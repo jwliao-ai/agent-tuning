@@ -7,9 +7,9 @@ import random
 import re
 import pprint
 from json_repair import repair_json
-from mat.envs.fctncalling.prompts import *
-from mat.envs.fctncalling.utils import *
-from mat.envs.fctncalling.retriever import Retriever
+from fctncalling_rft.envs.fctncalling.prompts import *
+from fctncalling_rft.envs.fctncalling.utils import *
+from fctncalling_rft.envs.fctncalling.retriever import Retriever
 from copy import deepcopy
 
 
@@ -103,7 +103,7 @@ class FctnCallingEnv:
                 self.cur_task.tool_action = ToolAction(name="")
                 task_desc = self.sub_task + self.cur_task.extra_content
             next_obs1 = INTENT_FIX_SHOT_USER_PROMPT_EN.format(
-                query=task_desc, intent_list=self.intent_categories
+                query=task_desc, intent_list=self.intent_categories  # type: ignore
             )
             score = 0
             self.stage = 2

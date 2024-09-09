@@ -8,11 +8,11 @@ from pathlib import Path
 import torch
 
 sys.path.append("../../")
-from mat.config import get_config
-from mat.envs.fctncalling.retriever import Retriever
-from mat.envs.fctncalling.fctncalling_env import FctnCallingEnv
-from mat.envs.env_wrappers import ShareSubprocVecEnv, ShareDummyVecEnv
-from mat.runner.shared.fctncalling_runner import FctnCallingRunner as Runner
+from fctncalling_rft.config import get_config
+from fctncalling_rft.envs.fctncalling.retriever import Retriever
+from fctncalling_rft.envs.fctncalling.fctncalling_env import FctnCallingEnv
+from fctncalling_rft.envs.env_wrappers import ShareSubprocVecEnv, ShareDummyVecEnv
+from fctncalling_rft.runner.shared.fctncalling_runner import FctnCallingRunner as Runner
 
 
 def make_train_env(all_args):

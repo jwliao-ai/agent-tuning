@@ -10,6 +10,7 @@ from torch.distributions.categorical import Categorical
 import gc
 import random
 from peft import (
+    PeftModel,
     LoraConfig,
     get_peft_model,
     get_peft_model_state_dict,
@@ -17,14 +18,13 @@ from peft import (
     set_peft_model_state_dict,
 )
 import os
-from peft import PeftModel
-from mat.models.critic import APPOCritic, TPPOCritic
+from fctncalling_rft.models.critic import APPOCritic, TPPOCritic
 
 
 class LlamaLoRAgent:
 
     def __init__(self, model_name, max_new_tokens, algo, load_path=None):
-        self.device = "cuda:0"
+        self.device = "cuda:3"
         self.algo = algo
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name, use_fast=False, padding_side="left"

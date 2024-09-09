@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
-from mat.utils.util import get_shape_from_obs_space, get_shape_from_act_space
+from fctncalling_rft.utils.util import get_shape_from_obs_space, get_shape_from_act_space
 
 
 def _flatten(T, N, x):
