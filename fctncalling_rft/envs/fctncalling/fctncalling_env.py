@@ -1,319 +1,145 @@
 import sys
 import json
-
-# sys.path.append("../../../")
 import numpy as np
 import random
 import re
 import pprint
-from json_repair import repair_json
 from fctncalling_rft.envs.fctncalling.prompts import *
 from fctncalling_rft.envs.fctncalling.utils import *
-from fctncalling_rft.envs.fctncalling.retriever import Retriever
-from copy import deepcopy
-
+from fctncalling_rft.envs.fctncalling.helper import *
+from fctncalling_rft.envs.fctncalling.handler.hammer import HammerHandler
+from fctncalling_rft.envs.fctncalling.checker.ast.ast_checker import ast_checker
+from fctncalling_rft.envs.fctncalling.checker.executable.executable_checker import (
+    executable_checker_rest,
+    executable_checker_non_rest,
+)
+from fctncalling_rft.envs.fctncalling.checker.multi_turn.multi_turn_checker import (
+    multi_turn_checker,
+    multi_turn_irrelevance_checker,
+)
+from fctncalling_rft.envs.fctncalling.checker.multi_turn.multi_turn_utils import *
+from fctncalling_rft.envs.fctncalling.checker.executable.custom_exception import BadAPIStatusError, NoAPIKeyError
 
 class FctnCallingEnv:
 
-    def __init__(self, flag, rank, dataset_path, retriever: Retriever, no_nan=True):
+    def __init__(self, flag, rank, model_name, dataset_path, no_nan=True):
         self.rank = rank
         self.no_nan = no_nan
         self.n_agents = 1
-        self.max_step = 8
-        self.retriever = retriever
-        self.complex_query = False
-        self.multi_turn = False
-        self.multi_func = False
-        self.retrieval_top_k = 6
+        self.model_name = model_name
+        self.handler = HammerHandler(model_name=model_name)
+        self.api_sanity_check = False
         self.dataset = []
         with open(dataset_path, "r") as f:
             self.dataset = json.load(f)
 
-        self.stage = 0
-        self.step_count = 0
-        self.instruction = ""
-        self.history = []
-        self.final_status = ""
-        self.available_tools_text = ""
+        # A flag to indicate if the API has been tested.
+        # We should always test the API with ground truth first before running the executable tests.
+        # Sometimes the API may not be working as expected and we want to catch that before running the evaluation to ensure the results are accurate.
+        self.API_TESTED = False
+        self.API_STATUS_ERROR_REST = None
+        self.API_STATUS_ERROR_EXECUTABLE = None
 
         # self.log_file = f"../../mat/envs/fctncalling/cache/{flag}_{rank}.py"
         # with open(self.log_file, "w") as f:
         #     f.write("")
 
     def reset(self):
-        self.retrieved_funcs = []
-        self.retrieved_funcs_text = ""
-        self.tool_select_task = ""
-        self.tool_schema_mapping = {}
-        self.task_done = False
-        self.traj = random.choice(self.dataset)
-        self.task = self.traj["query"]
-        self.answers = self.traj["answers"]
-        self.history = [{"query": self.task}]
-        if (
-            self.complex_query == False
-        ):  # next stage: tool selection (for easy query, skip task decomposition)
-            self.plans = TaskTree.from_list([self.task])
-            self.cur_task = self.plans.get_undo_task(leaf_first=True)
-            self.sub_task = self.handle_placeholder(self.cur_task)
-            self.retrieved_funcs = self.retriever.get_relevant_documents(
-                self.sub_task, self.retrieval_top_k
-            )
-            if not set(self.answers["tool_list"]).issubset(
-                set([rtool["name"] for rtool in self.retrieved_funcs])
-            ):
-                self.reset()
-            for tool in self.retrieved_funcs:
-                self.retrieved_funcs_text += TOOL_LIST_SCHEMA.format(
-                    name=tool["name"], description=tool["description"]
-                )
-                self.tool_schema_mapping[tool["name"]] = tool
-            # pprint.pp(self.answers['tool_list'])
-            obs1 = SELECT_TOOL_EN.format(
-                query=self.sub_task + self.cur_task.extra_content,
-                tool_list=self.retrieved_funcs_text.strip(),
-            )
-            self.stage = 2
-        else:  # next stage: task decomposition
-            self.available_tools_text = self.available_tools_text.strip()
-            obs1 = RAG_LORA_USER_PROMPT_EN.format(
-                available_tools=self.available_tools_text, query=self.task
-            )
+        self.entry: dict = random.choice(self.dataset)
+        self.id: str = self.entry["id"]
+        self.category = self.id.rsplit("_", 1)[0]
+        self.question: list[list[dict]] = self.entry["question"]
+        self.function: list[dict] = self.entry["function"]
+        if not is_relevance_or_irrelevance(self.category):
+            self.ground_truth = self.entry[
+                "ground_truth"
+            ]  # list[dict] for single-turn or list[list[str]] for multi-turn)
+        self.turn_count = 0
+        self.max_turns = len(self.question)
 
-        obs = np.array([obs1], dtype=np.object_)
-        self.history = [{"query": self.task}, {"observation": obs1}]
-        self.step_count = 0
+        if is_chatable(self.category) or is_sql(self.category):  # not support now
+            self.reset()
+
+        if is_multi_turn(self.category):
+            self.task_progress = 0
+            self.initial_config = self.entry['initial_config']
+            self.involved_classes = self.entry['involved_classes']
+            self.holdout_function: dict[int, list] = self.entry.get("missed_function", {})
+
+        self.language = "Python"
+        if is_java(self.category):
+            self.language = "Java"
+        if is_js(self.category):
+            self.language = "JavaScript"
+
+        # get executable expected output (depending on API status, not support now)
+        if is_executable(self.category):
+            # We only test the API with ground truth once
+            if not self.API_TESTED and self.api_sanity_check:
+                print("---- Sanity checking API status ----")
+                try:
+                    api_status_sanity_check_rest()
+                except BadAPIStatusError as e:
+                    self.API_STATUS_ERROR_REST = e
+
+                try:
+                    api_status_sanity_check_executable()
+                except BadAPIStatusError as e:
+                    self.API_STATUS_ERROR_EXECUTABLE = e
+
+                display_api_status_error(
+                    self.API_STATUS_ERROR_REST,
+                    self.API_STATUS_ERROR_EXECUTABLE,
+                    display_success=True,
+                )
+                print("Continuing evaluation...")
+                self.API_TESTED = True
+
+            if not is_rest(self.category):
+                self.entry["execution_result"] = get_executable_expected_output(
+                    self.ground_truth
+                )
+
+        self.history = self.handler._pre_query_processing_prompting(self.entry)
+        self.history = self.handler.add_first_turn_message_prompting(
+            self.history, self.question[0]
+        )
+        formatted_prompt = self.handler.format_prompt(
+            self.history["message"], self.history["function"]
+        )
+
+        obs = np.array([formatted_prompt], dtype=np.object_)
 
         return obs
 
     def step(self, action):
-        self.step_count += 1
-        bug_free = True
         action = action[0]
-        self.history.append({"action": action})
+        self.history["message"].extend([{"role": "assistant", "content": action}])
 
-        if (
-            self.stage == 0
-        ):  # task decomposition done, return observation for intent classification
-            # task_list = action.split('<|action|>')[-1].split('<Functions>')[0].strip().split('|task_id|')
-            self.plans = TaskTree.from_list(self.task_list)
-
-            if self.cur_task:
-                self.cur_task.status = TaskStatus.DOING
-                self.cur_task.tool_action = ToolAction(name="")
-                task_desc = self.sub_task + self.cur_task.extra_content
-            next_obs1 = INTENT_FIX_SHOT_USER_PROMPT_EN.format(
-                query=task_desc, intent_list=self.intent_categories  # type: ignore
-            )
-            score = 0
-            self.stage = 2
-
-        elif (
-            self.stage == 2
-        ):  # tool selection done, check if the tool is correct, if not, reselect, if yes, return observation for parameter filling
-            self.action_func_names = [
-                x.strip() for x in action.strip().split(",") if x.strip() != ""
-            ]
-            self.action_func_index = 0
-            if set(self.action_func_names) == set(self.answers["tool_list"]):
-                self.multi_func = True
-                self.action_func_names = list(set(self.action_func_names))
-                self.cur_func = self.tool_schema_mapping[
-                    self.action_func_names[self.action_func_index]
-                ]  # here tool_names is a list WITH DEPENDENCY CONSTRAINT
-                self.action_func_index += 1
-                self.params = []
-                param_list = self.cur_func["required_param"]
-                param_list.extend(self.cur_func["optional_param"])
-                for item in param_list:
-                    p_name = list(item.keys())[0]
-                    p_meta = item[p_name]
-                    self.params.append(
-                        dict(
-                            name=p_name,
-                            **p_meta,
-                            required=p_name in self.cur_func["required_param"],
-                        )
-                    )
-                next_obs1 = FILL_PARAM_EN.format(
-                    tool_name=self.cur_func["name"],
-                    parameters=json.dumps(self.params),
-                    query=self.task,
-                )
-                score = 1
-                self.stage = 3
-                print(f"correct tool selection.")
-            elif set(self.action_func_names).issubset(set(self.answers["tool_list"])):
-                next_obs1 = SELECT_MORE_TOOL_EN.format(
-                    query=self.task,
-                    selected_tools=", ".join(self.action_func_names),
-                    tool_list=self.retrieved_funcs_text.strip(),
-                )
-                score = -0.5
-                bug_free = False
-            elif not set(self.action_func_names).issubset(
-                set(self.answers["tool_list"])
-            ):
-                hallucinated_tools = [
-                    tool_name
-                    for tool_name in self.action_func_names
-                    if tool_name not in [tool["name"] for tool in self.retrieved_funcs]
-                ]
-                wrong_tools = [
-                    tool_name
-                    for tool_name in self.action_func_names
-                    if tool_name in [tool["name"] for tool in self.retrieved_funcs]
-                    and tool_name not in self.answers["tool_list"]
-                ]
-                if hallucinated_tools and wrong_tools:
-                    next_obs1 = SELECT_TOOL_WRONG_HALLUCINATED_EN.format(
-                        query=self.task,
-                        selected_tools=", ".join(self.action_func_names),
-                        wrong_tools=", ".join(wrong_tools),
-                        hallucinated_tools=", ".join(hallucinated_tools),
-                        tool_list=self.retrieved_funcs_text.strip(),
-                    )
-                elif hallucinated_tools and not wrong_tools:
-                    next_obs1 = SELECT_TOOL_HALLUCINATED_EN.format(
-                        query=self.task,
-                        selected_tools=", ".join(self.action_func_names),
-                        hallucinated_tools=", ".join(hallucinated_tools),
-                        tool_list=self.retrieved_funcs_text.strip(),
-                    )
-                elif wrong_tools and not hallucinated_tools:
-                    next_obs1 = SELECT_TOOL_WRONG_EN.format(
-                        query=self.task,
-                        selected_tools=", ".join(self.action_func_names),
-                        wrong_tools=", ".join(wrong_tools),
-                        tool_list=self.retrieved_funcs_text.strip(),
-                    )
-                else:
-                    NotImplementedError
-                score = -1
-                bug_free = False
-            else:
-                NotImplementedError
-
-        elif (
-            self.stage == 3
-        ):  # parameter filling done, check if the parameter is correct, if not, double check, if yes, return observation for tool execution
-            param_label = self.get_answer_arguments(self.cur_func["name"])
-            # print(f"param label: ")
-            # pprint.pp(param_label)
-            param_completions = json.loads(repair_json(action.strip()))
-            print(f"param completions: {type(param_completions)}")
-            if type(param_completions[0]) == list:
-                param_completions = param_completions[0]
-            print(f"param completions: {type(param_completions)}")
-            pprint.pp(param_completions)
-            wrong_params = [x for x in param_completions if x not in param_label]
-            missing_params = [y for y in param_label if y not in param_completions]
-            if not wrong_params and not missing_params:  # correctly filled
-                score = 1
-                print(f"correct parameter completions.")
-                if self.multi_func and self.action_func_index < len(
-                    self.action_func_names
-                ):
-                    self.cur_func = self.tool_schema_mapping[
-                        self.action_func_names[self.action_func_index]
-                    ]
-                    self.action_func_index += 1
-                    self.params = []
-                    param_list = self.cur_func["required_param"]
-                    param_list.extend(self.cur_func["optional_param"])
-                    for item in param_list:
-                        p_name = list(item.keys())[0]
-                        p_meta = item[p_name]
-                        self.params.append(
-                            dict(
-                                name=p_name,
-                                **p_meta,
-                                required=p_name in self.cur_func["required_param"],
-                            )
-                        )
-                    next_obs1 = FILL_PARAM_EN.format(
-                        tool_name=self.cur_func["name"],
-                        parameters=json.dumps(self.params),
-                        query=self.task,
-                    )
-                else:
-                    self.task_done = True
-                    next_obs1 = (
-                        f"tool selection and parameter completions are all correct!"
-                    )
-            elif missing_params and not wrong_params:
-                next_obs1 = FILL_MORE_PARAM_EN.format(
-                    query=self.task,
-                    tool_name=self.cur_func,
-                    last_param_completions=action.strip(),
-                    parameters=json.dumps(self.params),
-                )
-                score = -1
-                bug_free = False
-            else:
-                next_obs1 = FILL_PARAM_WRONG_EN.format(
-                    query=self.task,
-                    tool_name=self.cur_func,
-                    last_param_completions=action.strip(),
-                    parameters=json.dumps(self.params),
-                )
-                score = -1
-                bug_free = False
-
-        next_obs = np.array([next_obs1], dtype=np.object_)
-        if not bug_free:
-            dones = np.ones((self.n_agents), dtype=bool)
+        results = []
+        if is_relevance_or_irrelevance(self.category):
+            relevance_result = self.relevance_or_irrelevance_check(action)
+            results.append(relevance_result)
+        elif is_executable(self.category):
+            executable_result = self.executable_check(action)
+            results.append(executable_result)
+        elif is_multi_turn(self.category):
+            multi_turn_result = self.multi_turn_check(action)
+            results.append(multi_turn_result)
         else:
-            if self.task_done:
-                score += 2.0 / self.step_count
-                dones = np.ones((self.n_agents), dtype=bool)
-            else:
-                dones = np.zeros((self.n_agents), dtype=bool)
+            ast_result = self.ast_check(action)
+            results.append(ast_result)
 
-        rewards = [score for _ in range(self.n_agents)]
+        next_obs, rewards, dones = self.transition_and_reward(results)
 
-        self.history.append({"observation": next_obs1})
         infos = [
             {
-                "task_done": self.task_done,
                 "history": self.history,
-                "traj_length": self.step_count,
+                "traj_length": self.turn_count,
             }
             for _ in range(self.n_agents)
         ]
         return next_obs, rewards, dones, infos
-
-    def handle_placeholder(self, task: TaskNode):
-        """处理多步任务规划任务结果依赖问题"""
-        task_desc = task.content
-        places = re.findall(
-            re.compile(r"\|placeholder_id\|\(([^(?!.*placeholder_id)]+)\)", re.S),
-            task_desc,
-        )
-        for place in places:
-            m = re.match("<\|\$s(\d+)\|>(.*)", place)
-            if m:
-                idx = int(m.group(1)) - 1
-                place_res = m.group(2)
-            else:
-                idx = -1
-                place_res = place[0]
-            task_desc = task_desc.replace(f"|placeholder_id|({place})", place_res)
-            node_list = self.plans.node_list()
-            for i in range(len(node_list)):
-                if node_list[i].status.is_doing():
-                    node_list = node_list[:i]
-                    break
-            response = node_list[idx].tool_response
-            task_desc += f"，{place_res}：{response}"
-        return task_desc
-
-    def get_answer_arguments(self, function_name: str) -> list[dict]:
-        arguments = []
-        for item in self.answers["param_filling"]:
-            if item["name"] == function_name:
-                arguments.append(item["arguments"])
-        return arguments
 
     def render(self, **kwargs):
         # self.env.render(**kwargs)
@@ -329,3 +155,329 @@ class FctnCallingEnv:
 
         env_info = {"n_agents": self.n_agents}
         return env_info
+
+    def relevance_or_irrelevance_check(self, action) -> dict:
+        decode_error = None
+        try:
+            decoded_action = self.handler.decode_ast(action, self.language)
+            contain_func_call = False if is_empty_output(decoded_action) else True
+        except Exception as e:
+            contain_func_call = False
+            decode_error = str(e)
+            return {
+                "id": self.id,
+                "model_name": self.model_name,
+                "test_category": self.category,
+                "valid": False,
+                "error": [f"Failed to decode ast. {decode_error}"],
+                "error_type": "ast_decoder:decoder_failed",
+                "prompt": self.entry,
+                "action_raw": action,
+            }
+        success = (
+            not contain_func_call
+            if "irrelevance" in self.category
+            else contain_func_call
+        )
+        result = {
+            "id": self.id,
+            "model_name": self.model_name,
+            "test_category": self.category,
+            "valid": success,
+            "prompt": self.entry,
+            "action_raw": action,
+            "action_decoded": decoded_action,
+        }
+        if not success:
+            if "irrelevance" in self.category:
+                result["error"] = [
+                    f"Valid syntax. Successfully decode AST when it should not."
+                ]
+                result["error_type"] = "irrelevance_error:decoder_success"
+            else:
+                result["error"] = [
+                    f"Invalid syntax. Failed to decode AST when it should have. {decode_error}"
+                ]
+                result["error_type"] = "relevance_error:decoder_failed"
+        return result
+
+    def executable_check(self, action) -> dict:
+        decode_error = None
+        try:
+            decoded_action = self.handler.decode_execute(action)
+        except Exception as e:
+            decode_error = str(e)
+            return {
+                "id": self.id,
+                "model_name": self.model_name,
+                "test_category": self.category,
+                "valid": False,
+                "error": [f"Failed to decode executable. {decode_error}"],
+                "error_type": "executable_decoder:decoder_failed",
+                "prompt": self.entry,
+                "action_raw": str(action),
+            }
+
+        if is_rest(self.category):
+            if not is_rest_format_output(decoded_action):
+                return {
+                    "id": self.id,
+                    "model_name": self.model_name,
+                    "category": self.category,
+                    "valid": False,
+                    "error": [
+                        "Did not output in the specified format. Note: the model_result is wrapped in a string to ensure json serializability."
+                    ],
+                    "error_type": "executable_decoder:rest_wrong_output_format",
+                    "prompt": self.entry,
+                    "action_raw": str(action),
+                    "action_decoded": str(decoded_action),
+                }
+            checker_result = executable_checker_rest(decoded_action[0], idx)
+        else:
+            if not is_executable_format_output(decoded_action):
+                return {
+                    "id": self.id,
+                    "model_name": self.model_name,
+                    "category": self.category,
+                    "valid": False,
+                    "error": [
+                        "Did not output in the specified format. Note: the model_result is wrapped in a string to ensure json serializability."
+                    ],
+                    "error_type": "executable_decoder:wrong_output_format",
+                    "prompt": self.entry,
+                    "action_raw": str(action),
+                    "action_decoded": str(decoded_action),
+                }
+            checker_result = executable_checker_non_rest(
+                decoded_action, self.entry, self.category
+            )
+
+        return {
+            "id": self.id,
+            "model_name": self.model_name,
+            "category": self.category,
+            "valid": checker_result["valid"],
+            "error": checker_result["error"],
+            "error_type": checker_result["error_type"],
+            "prompt": self.entry,
+            "action_raw": str(action),
+            "action_decoded": str(decoded_action),
+            "model_executed_output": (
+                checker_result["model_executed_output"]
+                if "model_executed_output" in checker_result
+                else None
+            ),
+        }
+
+    def multi_turn_check(self, action) -> dict:
+        decode_error = None
+        tmp_ground_truth = self.ground_truth[self.task_progress]
+        action_list_decoded = []
+
+        try:
+            action_list_decoded = self.handler.decode_execute(action)
+            if is_empty_execute_response(
+                action_list_decoded
+            ) and not is_empty_execute_response(tmp_ground_truth):
+                return {
+                    "id": self.id,
+                    "model_name": self.model_name,
+                    "test_category": self.category,
+                    "valid": False,
+                    "error": [
+                        "Assistant response is decoded as empty because of not following the format instructions."
+                    ],
+                    "error_type": "multi_turn_decoder:empty_response",
+                    "prompt": self.entry,
+                    "action_raw": str(action),
+                    "decoded_action": str(action_list_decoded),
+                }
+        except Exception as e:
+            decode_error = str(e)
+            return {
+                "id": self.id,
+                "model_name": self.model_name,
+                "test_category": self.category,
+                "valid": False,
+                "error": [f"Failed to decode executable. {decode_error}"],
+                "error_type": "multi_turn_decoder:decoder_failed",
+                "prompt": self.entry,
+                "action_raw": str(action),
+            }
+
+        multi_turn_result = multi_turn_checker(
+            action_list_decoded,
+            tmp_ground_truth,
+            self.entry,
+            self.category,
+            self.model_name,
+            self.task_progress,
+        )
+
+        if contain_multi_turn_irrelevance(self.category):
+            irrelevance_result = multi_turn_irrelevance_checker(
+                action_list_decoded, tmp_ground_truth, self.task_progress
+            )
+        else:
+            irrelevance_result = {"valid": True}
+
+        if not irrelevance_result["valid"] and multi_turn_result["valid"]:
+            valid = False
+            error = [irrelevance_result["error"]]
+            error_type = irrelevance_result["error_type"]
+        elif irrelevance_result["valid"] and not multi_turn_result["valid"]:
+            valid = False
+            error = [multi_turn_result["error"]]
+            error_type = multi_turn_result["error_type"]
+        elif not irrelevance_result["valid"] and not multi_turn_result["valid"]:
+            valid = False
+            error = [irrelevance_result["error"] + "\n" + multi_turn_result["error"]]
+            error_type = (
+                irrelevance_result["error_type"]
+                + "\n"
+                + multi_turn_result["error_type"]
+            )
+        else:
+            valid = True
+            error = []
+            error_type = ""
+
+        if valid:
+            self.history["message"].append(
+                {"role": "tool", "content": multi_turn_result["execution_results"]}
+            )
+            return {
+                "id": self.id,
+                "model_name": self.model_name,
+                "test_category": self.category,
+                "valid": valid,
+                "prompt": self.entry,
+                "action_raw": str(action),
+                "action_decoded": str(action_list_decoded),
+                "ground_truth": tmp_ground_truth,
+                "execution_results": multi_turn_result["execution_results"],
+            }
+        else:
+            return {
+                "id": self.id,
+                "model_name": self.model_name,
+                "test_category": self.category,
+                "valid": valid,
+                "error": error,
+                "error_type": error_type,
+                "prompt": self.entry,
+                "action_raw": str(action),
+                "action_decoded": str(action_list_decoded),
+                "ground_truth": tmp_ground_truth,
+            }
+
+    def ast_check(self, action) -> dict:
+        decode_error = None
+        try:
+            decoded_action = self.handler.decode_ast(action, self.language)
+        except Exception as e:
+            decode_error = str(e)
+            return {
+                "id": self.id,
+                "model_name": self.model_name,
+                "test_category": self.category,
+                "valid": False,
+                "error": [f"Invalid syntax. Failed to decode AST. {decode_error}"],
+                "error_type": "ast_decoder:decoder_failed",
+                "prompt": self.entry,
+                "action_raw": str(action),
+            }
+
+        decoded_output_valid = is_function_calling_format_output(decoded_action)
+        if not decoded_output_valid:
+            return {
+                "id": self.id,
+                "model_name": self.model_name,
+                "test_category": self.category,
+                "valid": False,
+                "error": [
+                    "Did not output in the specified format. Note: the model_result is wrapped in a string to ensure json serializability."
+                ],
+                "error_type": "ast_decoder:decoder_wrong_output_format",
+                "prompt": self.entry,
+                "action_raw": str(action),
+                "action_decoded": str(decoded_action),
+            }
+        else:
+            checker_result = ast_checker(
+                self.function,
+                decoded_action,
+                self.ground_truth,
+                self.language,
+                self.category,
+                self.model_name,
+            )
+            return {
+                "id": self.id,
+                "model_name": self.model_name,
+                "test_category": self.category,
+                "valid": checker_result["valid"],
+                "error": (
+                    checker_result["error"] if not checker_result["valid"] else None
+                ),
+                "error_type": (
+                    checker_result["error_type"]
+                    if not checker_result["valid"]
+                    else None
+                ),
+                "prompt": self.entry,
+                "action_raw": str(action),
+                "action_decoded": str(decoded_action),
+                "ground_truth": self.ground_truth,
+            }
+
+    def transition_and_reward(self, results: list[dict]):
+        obs = ""
+        bug_free = True
+        error_num = 0.0
+        check_point_num = float(len(results))
+        self.turn_count += 1
+        for result in results:
+            if not result["valid"]:
+                bug_free = False
+                error_num += 1
+                obs += f"{result['error'][0]}\n"
+                dones = np.zeros((self.n_agents), dtype=bool)
+
+        if not bug_free:
+            self.history["message"].extend([{"role": "system", "content": obs}])
+        else:
+            if is_multi_turn(self.category):
+                self.task_progress += 1
+                if self.task_progress >= len(self.ground_truth):
+                    dones = np.ones((self.n_agents), dtype=bool)
+                    obs = "Well done!"
+                else:
+                    dones = np.zeros((self.n_agents), dtype=bool)
+                    if str(self.task_progress) in self.holdout_function:
+                        obs = DEFAULT_USER_PROMPT_FOR_ADDITIONAL_FUNCTION_PROMPTING.format(
+                            functions=self.holdout_function[str(self.task_progress)]
+                        )
+                    else:
+                        obs = self.question[self.task_progress][0]["content"]
+            else:
+                obs = "Well done!"
+                dones = np.ones((self.n_agents), dtype=bool)
+            self.history["message"].extend([{"role": "user", "content": obs}])
+            obs = self.handler.format_prompt(
+                self.history["message"], self.history["function"]
+            )
+
+        # force reset when reaching max turns
+        if self.turn_count >= self.max_turns or not bug_free:
+            dones = np.ones((self.n_agents), dtype=bool)
+
+        # if dones == np.ones((self.n_agents), dtype=bool):
+        #     pprint.pp(self.history["message"])
+
+        next_obs = np.array([obs], dtype=np.object_)
+        rewards = [(1.0 - error_num / check_point_num) for _ in range(self.n_agents)]
+        if not bug_free:
+            rewards = [-1.0 for _ in range(self.n_agents)]
+        return next_obs, rewards, dones

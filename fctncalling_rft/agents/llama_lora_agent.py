@@ -1,14 +1,8 @@
-import sys
-from time import sleep
-import transformers
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import torch.nn.functional as F
 import numpy as np
-import copy
 from torch.distributions.categorical import Categorical
-import gc
-import random
 from peft import (
     PeftModel,
     LoraConfig,
@@ -24,7 +18,7 @@ from fctncalling_rft.models.critic import APPOCritic, TPPOCritic
 class LlamaLoRAgent:
 
     def __init__(self, model_name, max_new_tokens, algo, load_path=None):
-        self.device = "cuda:3"
+        self.device = "cuda:0"
         self.algo = algo
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name, use_fast=False, padding_side="left"
@@ -37,9 +31,7 @@ class LlamaLoRAgent:
         self.base_model = AutoModelForCausalLM.from_pretrained(
             model_name, torch_dtype=torch.float16, device_map=self.device
         )
-        self.base_model.half().to(self.device)
 
-        # self.device = next(self.generator.parameters()).device
         self.max_new_tokens = max_new_tokens
 
         if load_path is None:
@@ -65,10 +57,6 @@ class LlamaLoRAgent:
 
             model.print_trainable_parameters()
 
-            old_state_dict = model.state_dict
-            model.state_dict = (
-                lambda self, *_, **__: get_peft_model_state_dict(self, old_state_dict())
-            ).__get__(model, type(model))
         else:
             model = PeftModel.from_pretrained(
                 self.base_model,
@@ -93,10 +81,12 @@ class LlamaLoRAgent:
             )
         return critic
 
-    def get_actions(self, obs):
+    @torch.no_grad()
+    def get_actions(self, obs, device=None):
         """
         Compute actions and value function predictions for the given inputs.
         """
+        device = self.device if device is None else device
         prompts = obs.tolist()
         token_seq = self.tokenizer(prompts, return_tensors="pt", padding=True)
         input_ids = token_seq["input_ids"].to(self.device)
@@ -111,8 +101,8 @@ class LlamaLoRAgent:
             max_new_tokens=self.max_new_tokens,
             eos_token_id=[
                 self.tokenizer.eos_token_id,
-                128000,
-                198,
+                # 128000,
+                # 198,
             ],  # 128000 and 198 are token ids of '\n'
             pad_token_id=self.tokenizer.pad_token_id,
             return_dict_in_generate=True,
@@ -121,25 +111,25 @@ class LlamaLoRAgent:
 
         actions = []
         action_tokens = (
-            torch.ones((sequences.shape[0], self.max_new_tokens), dtype=torch.int64).to(
-                self.device
+            torch.ones(
+                (sequences.shape[0], self.max_new_tokens),
+                dtype=torch.int64,
+                device=self.device,
             )
             * self.tokenizer.pad_token_id
         )
         for i in range(sequences.shape[0]):
             action_token = sequences[i][input_ids[i].shape[0] :]
             action_tokens[i, : action_token.shape[0]] = action_token
-            action = self.tokenizer.decode(
-                action_token, skip_special_tokens=True
-            ).replace(
-                "return", ""
-            )  # remove return token when stop with it
+            action = self.tokenizer.decode(action_token, skip_special_tokens=True)
             actions.append(action)
         actions = np.array(actions, dtype=np.object_)
 
         return actions, action_tokens
 
-    def get_action_values(self, obs):
+    @torch.no_grad()
+    def get_action_values(self, obs, devide=None):
+        device = self.device if device is None else device
         obs = obs.tolist()
         inputs = self.tokenizer(obs, return_tensors="pt", padding=True)
         input_ids = inputs["input_ids"].to(self.device)
@@ -150,21 +140,23 @@ class LlamaLoRAgent:
         # values = values.detach().float().cpu().numpy()
         return values
 
-    def get_slice(self, logits, obs_full_lengths, act_real_lengths):
+    def get_slice(self, logits, obs_full_lengths, act_real_lengths, device=None):
+        device = self.device if device is None else device
         action_slice = torch.zeros(
-            (logits.shape[0], self.max_new_tokens, logits.shape[-1])
-        ).to(self.device)
+            (logits.shape[0], self.max_new_tokens, logits.shape[-1]),
+            device=self.device,
+        )
         for i in range(logits.shape[0]):
             start_idx = obs_full_lengths - 1
             end_idx = obs_full_lengths + act_real_lengths[i] - 1
             action_slice[i, : act_real_lengths[i]] = logits[i, start_idx:end_idx]
         return action_slice
 
-    def get_token_values(self, obs, action_tokens):
-
+    def get_token_values(self, obs, action_tokens, train=False, device=None):
+        device = self.device if device is None else device
         obs_token_seq = self.tokenizer(obs.tolist(), return_tensors="pt", padding=True)
-        obs_input_ids = obs_token_seq["input_ids"].to(self.device)
-        obs_attn_mask = obs_token_seq["attention_mask"].to(self.device)
+        obs_input_ids = obs_token_seq["input_ids"].to(device)
+        obs_attn_mask = obs_token_seq["attention_mask"].to(device)
         obs_full_lengths = obs_input_ids.shape[1]
 
         act_attn_mask = action_tokens != 0
@@ -172,17 +164,21 @@ class LlamaLoRAgent:
 
         obs_act_ids = torch.cat([obs_input_ids, action_tokens], dim=1)
         obs_act_mask = torch.cat([obs_attn_mask, act_attn_mask], dim=1)
-
         with self.actor.disable_adapter():
-            values = self.critic(obs_act_ids, attention_mask=obs_act_mask)
-        values = self.get_slice(values, obs_full_lengths, act_real_lengths)
+            if not train:
+                with torch.no_grad():
+                    values = self.critic(obs_act_ids, attention_mask=obs_act_mask)
+            else:
+                values = self.critic(obs_act_ids, attention_mask=obs_act_mask)
+        values = self.get_slice(values, obs_full_lengths, act_real_lengths).to(device)
         return values
 
-    def get_token_logits(self, obs, action_tokens, batch_infer=False):
+    def get_token_logits(self, obs, action_tokens, device=None, batch_infer=False):
+        device = self.device if device is None else device
 
         obs_token_seq = self.tokenizer(obs.tolist(), return_tensors="pt", padding=True)
-        obs_input_ids = obs_token_seq["input_ids"].to(self.device)
-        obs_attn_mask = obs_token_seq["attention_mask"].to(self.device)
+        obs_input_ids = obs_token_seq["input_ids"].to(device)
+        obs_attn_mask = obs_token_seq["attention_mask"].to(device)
         obs_full_lengths = obs_input_ids.shape[1]
 
         act_attn_mask = action_tokens != 0
@@ -199,7 +195,7 @@ class LlamaLoRAgent:
                     obs_act_mask,
                     obs_full_lengths,
                     act_real_lengths,
-                )
+                ).to(device)
 
             pi_logits = self.batch_infer(
                 self.actor,
@@ -207,7 +203,7 @@ class LlamaLoRAgent:
                 obs_act_mask,
                 obs_full_lengths,
                 act_real_lengths,
-            )
+            ).to(device)
         else:
             with self.actor.disable_adapter():
                 rho_outputs = self.actor(
@@ -215,17 +211,18 @@ class LlamaLoRAgent:
                 )
                 rho_logits = self.get_slice(
                     rho_outputs.logits, obs_full_lengths, act_real_lengths
-                )
+                ).to(device)
 
             pi_outputs = self.actor(
                 input_ids=obs_act_ids, attention_mask=obs_act_mask, return_dict=True
             )
             pi_logits = self.get_slice(
                 pi_outputs.logits, obs_full_lengths, act_real_lengths
-            )
+            ).to(device)
 
         return pi_logits, rho_logits
 
+    @torch.no_grad()
     def batch_infer(
         self,
         model,
@@ -259,6 +256,7 @@ class LlamaLoRAgent:
             pos -= 1
         return pos
 
+    @torch.no_grad()
     def get_joint_action_log_probs(self, obs, action_tokens, batch_infer=False):
         pi_logits, _ = self.get_token_logits(
             obs, action_tokens, batch_infer=batch_infer
@@ -298,6 +296,8 @@ class LlamaLoRAgent:
             action_log_probs = action_log_probs.float().cpu().numpy()
             log_probs = action_log_probs
         elif self.algo == "TPPO":
+            # above leak happens
+            # get_token_values leak happens
             values = self.get_token_values(obs, action_tokens).squeeze(-1)
             pi_logits, _ = self.get_token_logits(obs, action_tokens, batch_infer=True)
             pi_log_softmax = torch.log_softmax(pi_logits, dim=-1)
@@ -348,8 +348,9 @@ class LlamaLoRAgent:
         )
         return action_log_probs, entropies
 
-    def infer_for_token_update(self, obs, action_tokens):
-        pi_logits, rho_logits = self.get_token_logits(obs, action_tokens)
+    def infer_for_token_update(self, obs, action_tokens, device=None):
+        device = self.device if device is None else device
+        pi_logits, rho_logits = self.get_token_logits(obs, action_tokens, device)
         return pi_logits, rho_logits
 
     def save(self, save_dir, episode):
@@ -361,7 +362,7 @@ class LlamaLoRAgent:
         self.actor.save_pretrained(exp_path)
         # save critic
         torch.save(
-            self.critic.v_head.state_dict(), os.path.join(exp_path, "critic.pth")
+            self.critic.state_dict(), os.path.join(exp_path, "critic.pth")
         )
 
     def load(self, save_dir):
@@ -370,9 +371,9 @@ class LlamaLoRAgent:
         self.critic = self._init_critic(critic_weights).to(self.device)
 
     def train(self):
-        self.generator.train()
+        self.actor.train()
         self.critic.train()
 
     def eval(self):
-        self.generator.eval()
+        self.actor.eval()
         self.critic.eval()

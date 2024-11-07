@@ -54,7 +54,7 @@ class APPOCritic(nn.Module):
         x = self.relu(self.v_head_mlp2(x))
         values = self.v_head_mlp3(x).squeeze(-1)
         return values
-    
+
 
 class TPPOCritic(nn.Module):
 
@@ -151,7 +151,7 @@ class ETPOCritic(nn.Module):
                 attention_mask=attention_mask,
                 use_cache=use_cache,
                 output_hidden_states=True)
-            
+
         hidden_states = transformer_outputs[1][-1].float()
 
         x = self.relu(self.v_head_mlp1(hidden_states))

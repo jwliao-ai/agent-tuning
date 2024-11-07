@@ -1,70 +1,79 @@
 from enum import Enum, unique
+import re
 import abc
 import time
 import hashlib
-from typing import Any, List, Dict, Callable, TypedDict
+from fctncalling_rft.envs.fctncalling.constant import *
+from pathlib import Path
+from typing import Any, List, Dict, Callable, TypedDict, Union
 
 from pydantic_core import CoreSchema, core_schema
 from pydantic import GetCoreSchemaHandler, BaseModel
+
 ################### Status classes ###################
+
 
 @unique
 class TaskStatus(Enum):
-    UNDO = 0        # not executed
-    DOING = 1       # executing
-    SUCCESS = 2     # success
-    FAIDED = 3      # failed
+    UNDO = 0  # not executed
+    DOING = 1  # executing
+    SUCCESS = 2  # success
+    FAIDED = 3  # failed
 
     def is_undo(self) -> bool:
         return self == TaskStatus.UNDO
-    
+
     def is_doing(self) -> bool:
         return self == TaskStatus.DOING
-    
+
     def is_success(self) -> bool:
         return self == TaskStatus.SUCCESS
-    
+
     def is_failed(self) -> bool:
         return self == TaskStatus.FAIDED
-    
+
+
 @unique
 class MemStage(Enum):
-    INPUT = 'input'         # user input
-    PLAN = 'plan'           # task plan
-    SUB_TASK = 'sub_task'   # current sub task
-    SELECT = 'select'       # user select
-    EXECUTE = 'execute'     # tool execute
-    ASKING = 'asking'       # interaction with user
+    INPUT = "input"  # user input
+    PLAN = "plan"  # task plan
+    SUB_TASK = "sub_task"  # current sub task
+    SELECT = "select"  # user select
+    EXECUTE = "execute"  # tool execute
+    ASKING = "asking"  # interaction with user
 
     def __str__(self) -> str:
         return self.value
-    
+
+
 @unique
 class AgentStatus(Enum):
-    WAITTINGTASK = 'WAITTINGTASK'
-    RUNNING = 'RUNNING'
-    WAITTINGOBSERVATION = 'WAITTINGOBSERVATION'
-    WAITTINGAPP = 'WAITTINGAPP'
-    WAITTINGPARAM = 'WAITTINGPARAM'
+    WAITTINGTASK = "WAITTINGTASK"
+    RUNNING = "RUNNING"
+    WAITTINGOBSERVATION = "WAITTINGOBSERVATION"
+    WAITTINGAPP = "WAITTINGAPP"
+    WAITTINGPARAM = "WAITTINGPARAM"
 
     @property
     def is_waiting_task(self) -> bool:
-        return self.value.startswith('WAITTIN')
-    
+        return self.value.startswith("WAITTIN")
+
     def __str__(self) -> str:
         return self.value
-    
+
+
 @unique
 class InstructionCategory(Enum):
-    TOOLUSE = 'TOOLUSE'
-    PARAM_COMPLETE = 'PARAM_COMPLETE'
-    OTHER = 'OTHER'
+    TOOLUSE = "TOOLUSE"
+    PARAM_COMPLETE = "PARAM_COMPLETE"
+    OTHER = "OTHER"
+
 
 @unique
 class ActionStatus(Enum):
     ASKING = 0  # missing param
-    OK = 1      # param ok
-    OTHER = 2   # other error
+    OK = 1  # param ok
+    OTHER = 2  # other error
 
 
 ################### Struct classes ###################
@@ -82,15 +91,19 @@ class DotDict(dict):
         raise AttributeError
 
     @classmethod
-    def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
         return core_schema.no_info_after_validator_function(cls, handler(dict))
-    
+
+
 class BaseData(BaseModel):
     def __init__(self, *args, **kwargs):
         for key, value in kwargs.items():
             if isinstance(value, dict):
                 kwargs[key] = DotDict(value)
         super().__init__(*args, **kwargs)
+
 
 class Observation(BaseData):
     status: str
@@ -104,7 +117,7 @@ class Observation(BaseData):
         kwargs["status"] = kwargs.get("status", self.status)
         kwargs["message"] = kwargs.get("message", DotDict(self.message))
         return Observation(**kwargs)
-    
+
 
 class ToolAction(BaseData):
     name: str

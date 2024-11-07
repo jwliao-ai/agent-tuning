@@ -1,4 +1,4 @@
-# Function Calling Environment for RL Fine-tuning
+ # Function Calling Environment for RL Fine-tuning (versatile version feat. BFCL)
 
 ## Introduction
 
@@ -16,120 +16,121 @@ Create a virtual environment with `conda create -n your_env_name python=3.10.13`
 
 ### Dataset
 
-The dataset should be processed and constructed by yourself. And it can be based on various of datasets like xlam-function-calling-60k, ToolBench, etc.
-
-The structure of the dataset should be a list of dicts like this:
+The dataset should have a similar structure as the data BFCL uses with the following structure:
 ```
 {
-    "query": the user query,
-    "answers": {
-        "tool_list": a list of answer tools.
-        "param_filling": a list of parameter completions.
-    }
-}
-```
-for example:
-```
-{
-    "query": "Where can I find live giveaways for beta access and games?",
-    "answers": {
-        "tool_list": [
-            "live_giveaways_by_type",
-            "live_giveaways_by_type"
-        ],
-        "param_filling": [
+    'id': 'multiple/multi-turn/parallel_java/python/javascript_num',    # use id to choose language and multi-turn or simple or multiple or parallel
+    'question': [
+        [
             {
-                "name": "live_giveaways_by_type",
-                "arguments": {
-                    "type": "beta"
+                "role": "user",
+                "content": "How can I validate user input in a form field with the ID 'userInputField' after the user has finished typing?"
+            }
+        ],
+        # ... if multi turn
+    ],
+    'function': [
+        {
+            'name': 'name',
+            'description': 'description',
+            'parameters': {
+                'type': 'type',
+                'properties': {
+                    'arg_1': {
+                        'type': 'type',
+                        'description': 'description'
+                    },
+                    # ... if more args
+                'required': [
+                    a list of required arg names
+                    ]
                 }
             },
-            {
-                "name": "live_giveaways_by_type",
-                "arguments": {
-                    "type": "game"
+            'response': {
+                'name': 'name',
+                'type': 'type',
+                'description': 'description',
+                'items': {    # if have
+                    'type': 'type'
                 }
-            }
-        ]
-    }
-}
-```
-
-### Tool Inventory
-
-The tool inventory should also be processed and constructed by yourself. And it can be based on various of datasets like xlam-function-calling-60k, ToolBench, etc.
-
-The structure of the tool inventory should be a list of dicts like this:
-```
-{
-    "name": the name of the tool,
-    "description": the description of the tool,
-    "required_param": a list of the required parameters of the tool,
-    "optional_param": a list of the optional parameters of the tool,
-}
-```
-for example:
-```
-{
-    "name": "search_torrents",
-    "description": "Search for torrents based on given keywords using the RapidAPI service.",
-    "required_param": [
-        {
-            "keywords": {
-                "description": "Keywords to search for torrents.",
-                "type": "str",
-                "default": "Meg 2 The Trench"
-            }
+            },
         },
-        {
-            "quantity": {
-                "description": "Number of torrent results to return. Maximum value is 40.",
-                "type": "int",
-                "default": "40"
-            }
-        }
-    ],
-    "optional_param": [
-        {
-            "page": {
-                "description": "Page number for paginated results. Defaults to 1.",
-                "type": "int, optional",
-                "default": "1"
-            }
-        }
+        # ... if multiple
     ]
-},
+    'initial_config':{} # if multi turn, as a environment setting (question: how to let the agent know)
+    'invoked_classes': [
+        'invoked_classes',
+        ......
+    ]
+    'ground_truth': [
+        # for multi-turn, a list of str (executable function call)
+        # for single-turn, a list of dict (json formatted function call)
+    ]
+}
 ```
 
 *PS: if the dataset you are processing has more info than the required info above, you can add more info to the dataset and tool inventory for any other training purpose if you want for sure.*
 
-## Train
+### Dataset Loading
+
+The environment loads the dataset easily like:
+```
+with open(dataset_path, "r") as f:
+    self.dataset = json.load(f)
+```
+which means all the data should be included in single file and strictly follow JSON format. This may not be the most general one but works for now.
+
+## Environment process
+
+### Reset
+
+When `done` is ones, the environment resets. And a new entry will be randomly chosen as a new current task. All the questions, ground truth, entry id, observations, actions, history will be refreshed.
+
+### Step
+
+Given the observation, the model (agent) acts (giving a response whcih means 'Step'). The action (or response) will be decoded for ast or execution by the handler, and will be checked and evaluated by some kind of checker according to its category (contained in the entry id). And environment will return a new observation, reward, done, info. The reward can be used for the agent to do training.
+
+### Buffer preparation
+
+After an episode, the buffer will do some preparation for APPO or TPPO. The preparation inlcludes doing Bellman-backup with Action Decomposition (BAD) which is generally called value update.
+
+### Training
+
+After buffer preparation, the trainer will train the agent. Sample a batch of on-policy data from the buffer and do value function training and policy training.
+
+## Training script
 
 Run the following command to train the model on your dataset and tool inventory and log the results:
 
 ```bash
-TOKENIZERS_PARALLELISM=true 
-python -u train_fctncalling.py \
-        --dataset_name your_dataset_name \ # required
-        --dataset_path your_dataset_path \ # required
-        --tool_inventory_path your_tool_inventory_path \ # required
-        --model_name_or_path your_model_name_or_path \ # required
-        --embedding_model your_embedding_model_name_or_path \ # required
-        --algorithm_name "APPO" \ # or "TPPO"
+CUDA_VISIBLE_DEVICES=0 python train_fctncalling.py \
+        --seed 10 \
+        --env_name "fctncalling_env" \
+        --algorithm_name "TPPO" \ # TPPO or APPO, now only support TPPO
+        --experiment_name "default" \
+        --num_mini_batch 2 \
         --ppo_epoch 1 \
-        --num_mini_batch 4 \
-        --experiment_name your_experiment_name \ 
-        --seed your_seed \
+        --lr 1e-7 \
+        --critic_lr 5e-6 \
+        --dataset_path path_to_BFCL_v3_multi_turn_base.json_or else \
+        --model_name_or_path path_to_model_weight \
+        --n_rollout_threads 2 \ # more for efficiency (even number is better)
+        --gradient_cp_steps 4 \ # for CUDA memory efficiency
+        --max_new_tokens 128 \
+        --save_interval 30 \ # interval of saving models
 ```
 
-The results (learning curves) will be saved in `./results/your_experiment_name/fctncalling_env/your_dataset_name/algorithm_name` folder. And you can use tensorboard to visualize the results.
+The results (learning curves) will be saved in `./results/your_experiment_name/model_type/your_dataset_name/algorithm_name` folder. And you can use tensorboard to visualize the results.
+
+## Current support
+
+- multi-facet checker (evaluation metrics).
+- multi-turn support,
+- multi-GPU training
 
 ## To be updated
 
-- Implementation of more **evaluation metrics**, e.g. AST, EXEC, RELEVANCE, etc.
-- **Reward normalization**.
-- Implementation of different agents for different family models like Deepseek, Qwen, etc.
+- Agents backboned proprietary models like GPT-4, etc.
 - Support for **questioning** stage.
-- Support for **multi-turn** conversation learning.
-- Support for multi-adapter switching. (centralized multi-agent learning).
-- Support for multi-GPU training.
+- Support for multi-adapter switching.
+- Design process for multi-agent -> algo. improvement.

@@ -4,15 +4,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from fctncalling_rft.utils.util import get_gard_norm, huber_loss, mse_loss
 from torch.distributions.categorical import Categorical
+from accelerate import Accelerator
 
 
 class TPPOTrainer:
 
-    def __init__(self, args, agent, num_agents):
+    def __init__(self, args, agent, num_agents, rank):
+        self.rank = rank
         self.agent = agent
-        self.device = self.agent.device
-        self.tpdv = dict(dtype=torch.float32, device=torch.device("cuda:0"))
-
+        self.accelerator = Accelerator()
         self.clip_param = args.clip_param
         self.ppo_epoch = args.ppo_epoch
         self.num_mini_batch = args.num_mini_batch
@@ -27,7 +27,6 @@ class TPPOTrainer:
         self.critic_lr = args.critic_lr
         self.opti_eps = args.opti_eps
         self.gradient_cp_steps = args.gradient_cp_steps
-
         self.policy_optimizer = torch.optim.AdamW(
             filter(lambda p: p.requires_grad, self.agent.actor.parameters()),
             lr=self.lr,
@@ -39,8 +38,17 @@ class TPPOTrainer:
             lr=self.critic_lr,
             eps=1e-5,
         )
-        # self.critic_optimizer = Lion(params=self.agent.critic.parameters(), lr=self.lr)
-        # self.policy_optimizer = Lion(params=self.agent.generator.parameters(), lr=self.lr)
+        (
+            self.agent.actor,
+            self.agent.critic,
+            self.policy_optimizer,
+            self.critic_optimizer,
+        ) = self.accelerator.prepare(
+            self.agent.actor,
+            self.agent.critic,
+            self.policy_optimizer,
+            self.critic_optimizer,
+        )
 
     def cal_token_mask(self, action_tokens_batch):
         pad_token = self.agent.tokenizer.pad_token_id
@@ -107,37 +115,51 @@ class TPPOTrainer:
             std_advantages + 1e-8
         )
 
-        log_prob_batch = torch.from_numpy(log_prob_batch).to(self.device)
-        value_preds_batch = torch.from_numpy(value_preds_batch).to(self.device)
-        return_batch = torch.from_numpy(return_batch).to(self.device)
-        advantages_batch = torch.from_numpy(advantages_batch).to(self.device)
-        action_tokens_batch = torch.from_numpy(action_tokens_batch).to(self.device)
-        token_mask = self.cal_token_mask(action_tokens_batch)
+        log_prob_batch = torch.from_numpy(log_prob_batch).to(self.rank)
+        value_preds_batch = torch.from_numpy(value_preds_batch).to(self.rank)
+        return_batch = torch.from_numpy(return_batch).to(self.rank)
+        advantages_batch = torch.from_numpy(advantages_batch).to(self.rank)
+        action_tokens_batch = torch.from_numpy(action_tokens_batch).to(self.rank)
+        token_mask = self.cal_token_mask(action_tokens_batch).to(self.rank)
         batch_size = obs_batch.shape[0]
 
         # critic update
-        values_infer = self.agent.get_token_values(
-            np.concatenate(obs_batch),
-            action_tokens_batch.view(-1, action_tokens_batch.shape[-1]),
-        ).squeeze(-1)
-        values_infer = values_infer.view(batch_size, -1, values_infer.shape[-1])
-
-        value_loss = self.cal_value_loss(
-            values_infer, value_preds_batch, return_batch, token_mask
-        )
-
         self.critic_optimizer.zero_grad()
-        value_loss.backward()
+        cp_batch_size = int(batch_size // self.gradient_cp_steps)
+        total_value_loss = 0
+        for start in range(0, batch_size, cp_batch_size):
+            end = start + cp_batch_size
+            values_infer_chunk = self.agent.get_token_values(
+                obs=np.concatenate(obs_batch[start:end]),
+                action_tokens=action_tokens_batch[start:end].view(
+                    -1, action_tokens_batch.shape[-1]
+                ),
+                train=True,
+                device=self.rank,
+            ).squeeze(-1)
+            values_infer_chunk = values_infer_chunk.view(
+                obs_batch[start:end].shape[0], -1, values_infer_chunk.shape[-1]
+            )
+            value_loss_chunk = self.cal_value_loss(
+                values_infer_chunk,
+                value_preds_batch[start:end],
+                return_batch[start:end],
+                token_mask[start:end],
+            )
+            value_loss_chunk /= self.gradient_cp_steps  # Normalize loss
+            self.accelerator.backward(value_loss_chunk)
+            total_value_loss += value_loss_chunk.item()
+
         if self._use_max_grad_norm:
-            critic_grad_norm = nn.utils.clip_grad_norm_(
+            critic_grad_norm = self.accelerator.clip_grad_norm_(
                 self.agent.critic.parameters(), self.max_grad_norm
             )
         else:
             critic_grad_norm = get_gard_norm(self.agent.critic.parameters())
         self.critic_optimizer.step()
-        value_loss = value_loss.item()
         self.critic_optimizer.zero_grad()
         critic_grad_norm = critic_grad_norm.item()
+        value_loss = total_value_loss * self.gradient_cp_steps  # Scale back the loss
 
         # policy update
         self.policy_optimizer.zero_grad()
@@ -149,6 +171,7 @@ class TPPOTrainer:
             pi_logits, _ = self.agent.infer_for_token_update(
                 np.concatenate(obs_batch[start:end]),
                 action_tokens_batch[start:end].view(-1, action_tokens_batch.shape[-1]),
+                self.rank,
             )
             pi_logits = pi_logits.view(
                 obs_batch[start:end].shape[0], -1, *pi_logits.shape[-2:]
@@ -168,12 +191,12 @@ class TPPOTrainer:
             total_approx_kl += approx_kl / self.gradient_cp_steps
             total_entropy += entropy_value / self.gradient_cp_steps
             policy_loss /= self.gradient_cp_steps
-            policy_loss.backward()
+            self.accelerator.backward(policy_loss)
         if total_approx_kl > 0.02:
             self.policy_optimizer.zero_grad()
             return value_loss, critic_grad_norm, 0, 0, 0
 
-        policy_grad_norm = nn.utils.clip_grad_norm_(
+        policy_grad_norm = self.accelerator.clip_grad_norm_(
             self.agent.actor.parameters(), self.max_grad_norm
         )
         self.policy_optimizer.step()
@@ -225,9 +248,7 @@ class TPPOTrainer:
         return train_info
 
     def prep_training(self):
-        self.agent.actor().train()
-        self.agent.critic().train()
+        self.agent.train()
 
     def prep_rollout(self):
-        self.agent.actor().eval()
-        self.agent.critic().eval()
+        self.agent.eval()
