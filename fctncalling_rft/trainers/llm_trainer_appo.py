@@ -7,7 +7,8 @@ from fctncalling_rft.utils.util import get_gard_norm, huber_loss, mse_loss
 
 class APPOTrainer:
 
-    def __init__(self, args, agent, num_agents):
+    def __init__(self, args, agent, num_agents, rank):
+        self.rank = rank
         self.agent = agent
         self.device = self.agent.device
         self.tpdv = dict(dtype=torch.float32, device=torch.device(self.device))
@@ -84,15 +85,15 @@ class APPOTrainer:
             action_tokens_batch,
         ) = sample
 
-        log_prob_batch = torch.from_numpy(log_prob_batch).to(self.device)
-        value_preds_batch = torch.from_numpy(value_preds_batch).to(self.device)
-        return_batch = torch.from_numpy(return_batch).to(self.device)
-        advantages_batch = torch.from_numpy(advantages_batch).to(self.device)
-        action_tokens_batch = torch.from_numpy(action_tokens_batch).to(self.device)
+        log_prob_batch = torch.from_numpy(log_prob_batch).to(self.rank)
+        value_preds_batch = torch.from_numpy(value_preds_batch).to(self.rank)
+        return_batch = torch.from_numpy(return_batch).to(self.rank)
+        advantages_batch = torch.from_numpy(advantages_batch).to(self.rank)
+        action_tokens_batch = torch.from_numpy(action_tokens_batch).to(self.rank)
         batch_size = obs_batch.shape[0]
 
         # critic update
-        values_infer = self.agent.get_action_values(np.concatenate(obs_batch))
+        values_infer = self.agent.get_action_values(obs_batch, device=self.rank)
         values_infer = values_infer.view(batch_size, -1)
 
         value_loss = self.cal_value_loss(values_infer, value_preds_batch, return_batch)
@@ -118,18 +119,23 @@ class APPOTrainer:
         for start in range(0, batch_size, cp_batch_size):
             end = start + cp_batch_size
             log_prob_infer, entropy = self.agent.infer_for_action_update(
-                np.concatenate(obs_batch[start:end]),
-                action_tokens_batch[start:end].view(-1, action_tokens_batch.shape[-1]),
+                obs_batch[start:end],
+                action_tokens_batch[start:end],
+                device=self.rank,
             )
-
-            log_prob_infer = log_prob_infer.view(obs_batch[start:end].shape[0], -1)
+            # print(f"before shape: {log_prob_infer.shape}")
+            # log_prob_infer = log_prob_infer.view(obs_batch[start:end].shape[0], -1)
+            # print(f"after shape: {log_prob_infer.shape}")
 
             cp_adv_batch = advantages_batch[start:end]
             cp_adv_batch = (cp_adv_batch - cp_adv_batch.mean()) / (
                 cp_adv_batch.std() + 1e-8
             )
 
-            entropy = entropy.view(obs_batch[start:end].shape[0], -1)
+            # print(f"before shape: {entropy.shape}")
+            # entropy = entropy.view(obs_batch[start:end].shape[0], -1)
+            # print(f"after shape: {entropy.shape}")
+
             policy_loss, approx_kl = self.cal_policy_loss(
                 log_prob_infer, log_prob_batch[start:end], cp_adv_batch, entropy
             )

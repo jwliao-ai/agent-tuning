@@ -55,12 +55,17 @@ class LanguageBuffer(object):
                 self.max_batch,
                 self.episode_length + 1,
                 self.n_rollout_threads,
-                num_agents,
+                self.num_agents,
             ),
             dtype=np.object_,
         )
         self.actions = np.empty(
-            (self.max_batch, self.episode_length, self.n_rollout_threads, num_agents),
+            (
+                self.max_batch,
+                self.episode_length,
+                self.n_rollout_threads,
+                self.num_agents,
+            ),
             dtype=np.object_,
         )
         self.action_tokens = np.empty(
@@ -68,13 +73,18 @@ class LanguageBuffer(object):
                 self.max_batch,
                 self.episode_length,
                 self.n_rollout_threads,
-                num_agents,
+                self.num_agents,
                 self.max_new_tokens,
             ),
             dtype=np.int64,
         )
         self.rewards = np.zeros(
-            (self.max_batch, self.episode_length, self.n_rollout_threads, num_agents),
+            (
+                self.max_batch,
+                self.episode_length,
+                self.n_rollout_threads,
+                self.num_agents,
+            ),
             dtype=np.float32,
         )
         self.masks = np.ones(
@@ -82,7 +92,7 @@ class LanguageBuffer(object):
                 self.max_batch,
                 self.episode_length + 1,
                 self.n_rollout_threads,
-                num_agents,
+                self.num_agents,
             ),
             dtype=np.float32,
         )
@@ -93,12 +103,17 @@ class LanguageBuffer(object):
                 self.max_batch,
                 self.episode_length + 1,
                 self.n_rollout_threads,
-                num_agents,
+                self.num_agents,
             ),
             dtype=np.float32,
         )
         self.action_level_returns = np.zeros(
-            (self.max_batch, self.episode_length, self.n_rollout_threads, num_agents),
+            (
+                self.max_batch,
+                self.episode_length,
+                self.n_rollout_threads,
+                self.num_agents,
+            ),
             dtype=np.float32,
         )
         self.action_level_advantages = np.zeros_like(self.action_level_returns)
@@ -110,7 +125,7 @@ class LanguageBuffer(object):
                 self.max_batch,
                 self.episode_length + 1,
                 self.n_rollout_threads,
-                num_agents,
+                self.num_agents,
                 self.max_new_tokens,
             ),
             dtype=np.float32,
@@ -120,7 +135,7 @@ class LanguageBuffer(object):
                 self.max_batch,
                 self.episode_length,
                 self.n_rollout_threads,
-                num_agents,
+                self.num_agents,
                 self.max_new_tokens,
             ),
             dtype=np.float32,
@@ -170,7 +185,16 @@ class LanguageBuffer(object):
         self.cur_batch_index = (self.cur_batch_index + 1) % self.max_batch
         self.obs[self.cur_batch_index, 0] = self.obs[self.pre_batch_index, -1].copy()
 
-    def get_last_token_position(self, action_tokens):
+    def get_last_token_position(self, action_tokens: torch.Tensor) -> int:
+        """
+        Given the action tokens, return the last token position.
+
+        Args:
+            action_tokens: (torch.Tensor): (max_new_tokens)
+
+        Return:
+            last_token_position: (torch.Tensor): int
+        """
         pos = len(action_tokens) - 1
         while action_tokens[pos] == self.pad_token_id:
             pos -= 1
@@ -180,24 +204,28 @@ class LanguageBuffer(object):
         self.action_level_v_values[self.cur_batch_index, -1] = next_value
         gae = 0
         for step in reversed(range(self.episode_length)):
-            delta = (
-                self.rewards[self.cur_batch_index, step]
-                + self.gamma
-                * self.action_level_v_values[self.cur_batch_index, step + 1]
-                * self.masks[self.cur_batch_index, step + 1]
-                - self.action_level_v_values[self.cur_batch_index, step]
-            )
-            gae = (
-                delta
-                + self.gamma
-                * self.gae_lambda
-                * self.masks[self.cur_batch_index, step + 1]
-                * gae
-            )
-            self.action_level_returns[self.cur_batch_index, step] = (
-                self.action_level_v_values[self.cur_batch_index, step] + gae
-            )
-            self.action_level_advantages[self.cur_batch_index, step] = gae
+            for agent in reversed(range(self.num_agents)):
+                delta = (
+                    self.rewards[self.cur_batch_index, step, :, agent]
+                    + self.gamma
+                    * self.action_level_v_values[
+                        self.cur_batch_index, step + 1, :, agent
+                    ]
+                    * self.masks[self.cur_batch_index, step + 1, :, agent]
+                    - self.action_level_v_values[self.cur_batch_index, step, :, agent]
+                )
+                gae = (
+                    delta
+                    + self.gamma
+                    * self.gae_lambda
+                    * self.masks[self.cur_batch_index, step + 1, :, agent]
+                    * gae
+                )
+                self.action_level_returns[self.cur_batch_index, step, :, agent] = (
+                    self.action_level_v_values[self.cur_batch_index, step, :, agent]
+                    + gae
+                )
+                self.action_level_advantages[self.cur_batch_index, step, :, agent] = gae
 
         self.cur_num_batch = (
             self.cur_num_batch + 1
@@ -211,45 +239,48 @@ class LanguageBuffer(object):
         for thread in range(self.n_rollout_threads):
             gae = 0
             for step in reversed(range(self.episode_length)):
-                last_token = self.get_last_token_position(
-                    self.action_tokens[self.cur_batch_index, step, thread, 0, :]
-                )
-                for token in reversed(range(last_token + 1)):
-                    rew = self.rewards[self.cur_batch_index, step, thread, :]
-                    v = self.tppo_values[self.cur_batch_index, step, thread, :, token]
-                    if token == last_token:
-                        v_next = self.tppo_values[
-                            self.cur_batch_index, step + 1, thread, :, 0
-                        ]
-                        mask_next = self.masks[
-                            self.cur_batch_index, step + 1, thread, :
-                        ]
-                        delta = rew + self.gamma * v_next * mask_next - v
-                        gae = delta + self.gamma * self.gae_lambda * mask_next * gae
-                    else:
-                        v_next = self.tppo_values[
-                            self.cur_batch_index, step, thread, :, token + 1
-                        ]
-                        if self.algo == "POAD":
-                            delta = v_next - v
-                        else:
-                            # for NTPO
-                            delta = self.gamma * v_next - v
-                        gae = delta + self.gamma * self.gae_lambda * gae
-
-                    self.tppo_returns[self.cur_batch_index, step, thread, :, token] = (
-                        gae + v
+                for agent in reversed(range(self.num_agents)):
+                    last_token = self.get_last_token_position(
+                        self.action_tokens[self.cur_batch_index, step, thread, agent, :]
                     )
-                    self.tppo_advantages[
-                        self.cur_batch_index, step, thread, :, token
-                    ] = gae
+                    for token in reversed(range(last_token + 1)):
+                        rew = self.rewards[self.cur_batch_index, step, thread, agent]
+                        v = self.tppo_values[
+                            self.cur_batch_index, step, thread, agent, token
+                        ]
+                        if token == last_token:
+                            v_next = self.tppo_values[
+                                self.cur_batch_index, step + 1, thread, agent, 0
+                            ]
+                            mask_next = self.masks[
+                                self.cur_batch_index, step + 1, thread, agent
+                            ]
+                            delta = rew + self.gamma * v_next * mask_next - v
+                            gae = delta + self.gamma * self.gae_lambda * mask_next * gae
+                        else:
+                            v_next = self.tppo_values[
+                                self.cur_batch_index, step, thread, agent, token + 1
+                            ]
+                            if self.algo == "POAD":
+                                delta = v_next - v
+                            else:
+                                # for NTPO
+                                delta = self.gamma * v_next - v
+                            gae = delta + self.gamma * self.gae_lambda * gae
+                        self.tppo_returns[
+                            self.cur_batch_index, step, thread, agent, token
+                        ] = (gae + v)
+                        self.tppo_advantages[
+                            self.cur_batch_index, step, thread, agent, token
+                        ] = gae
+
         self.cur_num_batch = (
             self.cur_num_batch + 1
             if self.cur_num_batch < self.max_batch
             else self.max_batch
         )
 
-    def appo_sampler(self, num_mini_batch=None, mini_batch_size=None):
+    def appo_sampler(self, num_mini_batch: int = None, mini_batch_size: int = None):
         """
         Yield training data for APPO.
         :param num_mini_batch: (int) number of minibatches to split the batch into.
@@ -302,7 +333,7 @@ class LanguageBuffer(object):
             action_tokens_batch = action_tokens[indices]
             yield obs_batch, action_batch, log_prob_batch, value_preds_batch, return_batch, advantages_batch, action_tokens_batch
 
-    def tppo_sampler(self, num_mini_batch=None, mini_batch_size=None):
+    def tppo_sampler(self, num_mini_batch: int = None, mini_batch_size: int = None):
         """
         Yield training data for TPPO.
         :param num_mini_batch: (int) number of minibatches to split the batch into.

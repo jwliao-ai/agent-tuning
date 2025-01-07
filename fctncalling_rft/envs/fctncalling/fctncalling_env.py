@@ -22,10 +22,10 @@ from fctncalling_rft.envs.fctncalling.checker.executable.custom_exception import
 
 class FctnCallingEnv:
 
-    def __init__(self, flag, rank, model_name, dataset_path, no_nan=True):
+    def __init__(self, flag, rank, model_name, num_agents, dataset_path, no_nan=True):
         self.rank = rank
         self.no_nan = no_nan
-        self.n_agents = 1
+        self.n_agents = num_agents
         self.model_name = model_name
         self.handler = HammerHandler(model_name=model_name)
         self.api_sanity_check = False
@@ -108,12 +108,14 @@ class FctnCallingEnv:
             self.history["message"], self.history["function"]
         )
 
-        obs = np.array([formatted_prompt], dtype=np.object_)
+        obs = np.array(
+            [formatted_prompt for _ in range(self.n_agents)], dtype=np.object_
+        )
 
         return obs
 
     def step(self, action):
-        action = action[0]
+        action = action[-1]
         self.history["message"].extend([{"role": "assistant", "content": action}])
 
         results = []
@@ -476,8 +478,14 @@ class FctnCallingEnv:
         # if dones == np.ones((self.n_agents), dtype=bool):
         #     pprint.pp(self.history["message"])
 
-        next_obs = np.array([obs], dtype=np.object_)
-        rewards = [(1.0 - error_num / check_point_num) for _ in range(self.n_agents)]
+        next_obs = np.array([obs for _ in range(self.n_agents)], dtype=np.object_)
+        rewards = [
+            0 if agent_idx != self.n_agents - 1 else (1.0 - error_num / check_point_num)
+            for agent_idx in range(self.n_agents)
+        ]
         if not bug_free:
-            rewards = [-1.0 for _ in range(self.n_agents)]
+            rewards = [
+                0 if agent_idx != self.n_agents - 1 else -1
+                for agent_idx in range(self.n_agents)
+            ]
         return next_obs, rewards, dones

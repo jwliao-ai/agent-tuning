@@ -130,16 +130,15 @@ class TPPOTrainer:
         for start in range(0, batch_size, cp_batch_size):
             end = start + cp_batch_size
             values_infer_chunk = self.agent.get_token_values(
-                obs=np.concatenate(obs_batch[start:end]),
-                action_tokens=action_tokens_batch[start:end].view(
-                    -1, action_tokens_batch.shape[-1]
-                ),
+                obs=obs_batch[start:end],
+                action_tokens=action_tokens_batch[start:end],
                 train=True,
                 device=self.rank,
             ).squeeze(-1)
-            values_infer_chunk = values_infer_chunk.view(
-                obs_batch[start:end].shape[0], -1, values_infer_chunk.shape[-1]
-            )
+            # value_infer_chunk shape (rollout_threads/batch_size, num_agents, max_new_tokens)
+            # values_infer_chunk = values_infer_chunk.view(
+            #     obs_batch[start:end].shape[0], -1, values_infer_chunk.shape[-1]
+            # )
             value_loss_chunk = self.cal_value_loss(
                 values_infer_chunk,
                 value_preds_batch[start:end],
@@ -169,13 +168,14 @@ class TPPOTrainer:
         for start in range(0, batch_size, cp_batch_size):
             end = start + cp_batch_size
             pi_logits, _ = self.agent.infer_for_token_update(
-                np.concatenate(obs_batch[start:end]),
-                action_tokens_batch[start:end].view(-1, action_tokens_batch.shape[-1]),
+                obs_batch[start:end],
+                action_tokens_batch[start:end],
                 self.rank,
             )
-            pi_logits = pi_logits.view(
-                obs_batch[start:end].shape[0], -1, *pi_logits.shape[-2:]
-            )
+            # shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
+            # pi_logits = pi_logits.view(
+            #     obs_batch[start:end].shape[0], -1, *pi_logits.shape[-2:]
+            # )
             pi_log_prob = torch.log_softmax(pi_logits, dim=-1)
             log_prob_infer = torch.gather(
                 pi_log_prob, -1, action_tokens_batch[start:end].unsqueeze(-1)

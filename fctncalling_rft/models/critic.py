@@ -26,6 +26,7 @@ class APPOCritic(nn.Module):
             self.relu = nn.ReLU()
         self.rwtranrsformer = base_model
         self.PAD_ID = tokenizer.pad_token_id
+        self.gradient_checkpointing_enable()
 
     def gradient_checkpointing_enable(self):
         self.rwtranrsformer.gradient_checkpointing_enable()
@@ -78,6 +79,7 @@ class TPPOCritic(nn.Module):
             self.relu = nn.ReLU()
         self.rwtranrsformer = base_model
         self.PAD_ID = tokenizer.pad_token_id
+        self.gradient_checkpointing_enable()
 
     def gradient_checkpointing_enable(self):
         self.rwtranrsformer.gradient_checkpointing_enable()

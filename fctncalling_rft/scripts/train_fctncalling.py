@@ -22,6 +22,7 @@ def make_train_env(all_args):
                 flag=all_args.flag,
                 rank=rank,
                 model_name=all_args.model_name,
+                num_agents=all_args.n_agents,
                 dataset_path=all_args.dataset_path,
             )
             env.seed(all_args.seed + rank * 1000)
@@ -41,6 +42,7 @@ def make_eval_env(all_args):
                 flag=all_args.flag,
                 rank=rank,
                 model_name=all_args.model_name,
+                num_agents=all_args.n_agents,
                 dataset_path=all_args.dataset_path,
             )
             env.seed(all_args.seed + rank * 5000)
@@ -120,6 +122,7 @@ def main(args):
     all_args = parse_args(args, parser)
     all_args.episode_length = 8
     all_args.log_interval = 1
+    all_args.n_agents = 2
 
     run_dir = build_run_dir(all_args)
     print(f"------ run dir: {run_dir} ------")

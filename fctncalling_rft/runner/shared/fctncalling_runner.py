@@ -18,7 +18,7 @@ def setup(
     rank: int,
     world_size: int,
     master_addr: str = "localhost",
-    port: int = 12356,
+    port: int = 12358,
     backend: str = "nccl",
 ):
     print(rank, "initializing distributed")
@@ -87,10 +87,9 @@ class FctnCallingRunner:
                 (episode + 1) * self.episode_length * self.n_rollout_threads
             )
             for step in range(self.episode_length):
-                # Sample actions
                 values, actions, action_tokens, log_probs = self.collect(step)
 
-                # Obser reward and next obs
+                # here suppose each agent gets the same reward
                 obs, rewards, dones, infos = self.envs.step(actions)
 
                 # insert data into buffer
@@ -135,17 +134,15 @@ class FctnCallingRunner:
 
     @torch.no_grad()
     def collect(self, step):
-        behaviour_data = self.agent.infer_for_rollout(
-            np.concatenate(self.buffer.obs[self.buffer.cur_batch_index, step])
+        actions, action_tokens, values, log_probs = self.agent.infer_for_rollout(
+            self.buffer.obs[self.buffer.cur_batch_index, step]
         )
 
-        actions, action_tokens, values, log_probs = behaviour_data
-
-        # [self.envs, agents]
-        values = np.array(np.split(values, self.n_rollout_threads))
-        actions = np.array(np.split(actions, self.n_rollout_threads))
-        action_tokens = np.array(np.split(action_tokens, self.n_rollout_threads))
-        log_probs = np.array(np.split(log_probs, self.n_rollout_threads))
+        # # [self.envs, agents] for single agent maybe
+        # values = np.array(np.split(values, self.n_rollout_threads))
+        # actions = np.array(np.split(actions, self.n_rollout_threads))
+        # action_tokens = np.array(np.split(action_tokens, self.n_rollout_threads))
+        # log_probs = np.array(np.split(log_probs, self.n_rollout_threads))
 
         return values, actions, action_tokens, log_probs
 
@@ -173,9 +170,8 @@ class FctnCallingRunner:
     def before_update(self):
         """Calculate returns for the collected data."""
         next_values = self.agent.get_next_values(
-            np.concatenate(self.buffer.obs[self.buffer.cur_batch_index, -1])
+            self.buffer.obs[self.buffer.cur_batch_index, -1]
         )
-        next_values = np.array(np.split(next_values, self.n_rollout_threads))
         if self.algo == "APPO":
             self.buffer.batch_process_appo(next_values)
         elif self.algo == "TPPO":

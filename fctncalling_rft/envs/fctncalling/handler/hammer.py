@@ -129,6 +129,8 @@ class HammerHandler():
         return python_format
 
     def decode_execute(self, result):
+        result = result.replace("```json", "")
+        result = result.replace("```python", "")
         result = result.replace("```", "")
         try:
             result = json.loads(result)
