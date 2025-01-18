@@ -4,7 +4,6 @@ import numpy as np
 import random
 import re
 import pprint
-from fctncalling_rft.envs.fctncalling.prompts import *
 from fctncalling_rft.envs.fctncalling.utils import *
 from fctncalling_rft.envs.fctncalling.helper import *
 from fctncalling_rft.envs.fctncalling.handler.hammer import HammerHandler
@@ -32,6 +31,7 @@ class FctnCallingEnv:
         self.dataset = []
         with open(dataset_path, "r") as f:
             self.dataset = json.load(f)
+        self.func_doc_path = "/home/ljw/codes/MadeAgents/fctncalling_rft/fctncalling_rft/envs/fctncalling/multi_turn_func_doc/"
 
         # A flag to indicate if the API has been tested.
         # We should always test the API with ground truth first before running the executable tests.
@@ -49,11 +49,8 @@ class FctnCallingEnv:
         self.id: str = self.entry["id"]
         self.category = self.id.rsplit("_", 1)[0]
         self.question: list[list[dict]] = self.entry["question"]
-        self.function: list[dict] = self.entry["function"]
         if not is_relevance_or_irrelevance(self.category):
-            self.ground_truth = self.entry[
-                "ground_truth"
-            ]  # list[dict] for single-turn or list[list[str]] for multi-turn)
+            self.ground_truth = self.entry["ground_truth"]  # list[dict] for single-turn or list[list[str]] for multi-turn)
         self.turn_count = 0
         self.max_turns = len(self.question)
 
@@ -64,7 +61,11 @@ class FctnCallingEnv:
             self.task_progress = 0
             self.initial_config = self.entry['initial_config']
             self.involved_classes = self.entry['involved_classes']
-            self.holdout_function: dict[int, list] = self.entry.get("missed_function", {})
+            self.function, self.holdout_function = load_func_docs(self.involved_classes, self.func_doc_path, self.entry.get("missed_function", {}))
+            self.entry['function'] = self.function
+            self.entry['holdout_function'] = self.holdout_function
+        else:
+            self.function: list[dict] = self.entry["function"]
 
         self.language = "Python"
         if is_java(self.category):

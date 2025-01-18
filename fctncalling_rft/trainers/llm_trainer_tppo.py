@@ -167,27 +167,15 @@ class TPPOTrainer:
         total_entropy = 0
         for start in range(0, batch_size, cp_batch_size):
             end = start + cp_batch_size
-            pi_logits, _ = self.agent.infer_for_token_update(
-                obs_batch[start:end],
-                action_tokens_batch[start:end],
-                self.rank,
-            )
+            pi_logits, _ = self.agent.get_token_logits(obs_batch[start:end], action_tokens_batch[start:end])
             # shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
             # pi_logits = pi_logits.view(
             #     obs_batch[start:end].shape[0], -1, *pi_logits.shape[-2:]
             # )
             pi_log_prob = torch.log_softmax(pi_logits, dim=-1)
-            log_prob_infer = torch.gather(
-                pi_log_prob, -1, action_tokens_batch[start:end].unsqueeze(-1)
-            ).squeeze(-1)
+            log_prob_infer = torch.gather(pi_log_prob, -1, action_tokens_batch[start:end].unsqueeze(-1)).squeeze(-1)
             entropy = Categorical(logits=pi_logits).entropy()
-            policy_loss, approx_kl, entropy_value = self.cal_policy_loss(
-                log_prob_infer,
-                log_prob_batch[start:end],
-                advantages_batch[start:end],
-                entropy,
-                token_mask[start:end],
-            )
+            policy_loss, approx_kl, entropy_value = self.cal_policy_loss(log_prob_infer, log_prob_batch[start:end], advantages_batch[start:end], entropy, token_mask[start:end])
             total_approx_kl += approx_kl / self.gradient_cp_steps
             total_entropy += entropy_value / self.gradient_cp_steps
             policy_loss /= self.gradient_cp_steps

@@ -30,7 +30,7 @@ def make_train_env(all_args):
 
         return init_env
 
-    return ShareSubprocVecEnv(
+    return ShareDummyVecEnv(
         [get_env_fn(i) for i in range(all_args.n_rollout_threads)]
     )
 
@@ -38,21 +38,11 @@ def make_train_env(all_args):
 def make_eval_env(all_args):
     def get_env_fn(rank):
         def init_env():
-            env = FctnCallingEnv(
-                flag=all_args.flag,
-                rank=rank,
-                model_name=all_args.model_name,
-                num_agents=all_args.n_agents,
-                dataset_path=all_args.dataset_path,
-            )
+            env = FctnCallingEnv(flag=all_args.flag, rank=rank, model_name=all_args.model_name, num_agents=all_args.n_agents, dataset_path=all_args.dataset_path,)
             env.seed(all_args.seed + rank * 5000)
             return env
-
         return init_env
-
-    return ShareSubprocVecEnv(
-        [get_env_fn(i) for i in range(all_args.n_eval_rollout_threads)]
-    )
+    return ShareDummyVecEnv([get_env_fn(i) for i in range(all_args.n_eval_rollout_threads)])
 
 
 def parse_args(args, parser):
@@ -122,7 +112,7 @@ def main(args):
     all_args = parse_args(args, parser)
     all_args.episode_length = 8
     all_args.log_interval = 1
-    all_args.n_agents = 2
+    all_args.n_agents = 1
 
     run_dir = build_run_dir(all_args)
     print(f"------ run dir: {run_dir} ------")

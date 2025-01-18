@@ -4,33 +4,10 @@ import numpy as np
 from functools import reduce
 from tqdm import tqdm
 import torch
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.distributed as dist
-import torch.multiprocessing as mp
 from tensorboardX import SummaryWriter
-from fctncalling_rft.models.codellama import Llama
-from fctncalling_rft.agents import LlamaLoRAgent
+from fctncalling_rft.agents import Actor
 from fctncalling_rft.utils import LanguageBuffer
 from fctncalling_rft.trainers import APPOTrainer, TPPOTrainer
-
-
-def setup(
-    rank: int,
-    world_size: int,
-    master_addr: str = "localhost",
-    port: int = 12358,
-    backend: str = "nccl",
-):
-    print(rank, "initializing distributed")
-    os.environ["MASTER_ADDR"] = master_addr
-    os.environ["MASTER_PORT"] = str(port)
-    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-
-
-def cleanup():
-    dist.destroy_process_group()
-
 
 def _t2n(x):
     return x.detach().cpu().numpy()
@@ -62,35 +39,38 @@ class FctnCallingRunner:
         self.envs = config["envs"]
         self.eval_envs = config["eval_envs"]
 
-        self.agent = LlamaLoRAgent(
-            self.all_args.model_name_or_path,
-            self.all_args.max_new_tokens,
-            self.algo,
-        )
+        self.agent = Actor(self.all_args.model_name_or_path, self.all_args.max_new_tokens, self.algo,)
 
-        self.buffer = LanguageBuffer(
-            self.all_args, self.num_agents, self.agent.tokenizer.pad_token_id
-        )
+        self.buffer = LanguageBuffer(self.all_args, self.num_agents, self.agent.tokenizer.pad_token_id)
+
+        if self.algo == "APPO":
+            self.trainer = APPOTrainer(self.all_args, self.agent, self.num_agents)
+        elif self.algo == "TPPO":
+            self.trainer = TPPOTrainer(self.all_args, self.agent, self.num_agents)
+        else:
+            raise NotImplementedError
+        
+        self.tokenizer = self.agent.tokenizer
 
     def run(self):
         obs = self.envs.reset()
         self.buffer.obs[self.buffer.cur_batch_index, 0] = obs.copy()
 
-        episodes = (
-            int(self.num_env_steps) // self.episode_length // self.n_rollout_threads
-        )
+        episodes = int(self.num_env_steps) // self.episode_length // self.n_rollout_threads
 
         progress_bar = tqdm(total=episodes, desc=f"Start running...", position=0, leave=True)
 
         for episode in range(episodes):
-            total_num_steps = (
-                (episode + 1) * self.episode_length * self.n_rollout_threads
-            )
+            total_num_steps = (episode + 1) * self.episode_length * self.n_rollout_threads
             for step in range(self.episode_length):
-                values, actions, action_tokens, log_probs = self.collect(step)
+                actions, action_tokens, values, log_probs = self.agent.infer_for_rollout(self.buffer.obs[self.buffer.cur_batch_index, step])
 
                 # here suppose each agent gets the same reward
                 obs, rewards, dones, infos = self.envs.step(actions)
+
+                tokenized_obs = self.agent.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True)
+                num_tokens = tokenized_obs["input_ids"].shape[1]
+                print(f"[run] num_tokens: {num_tokens}")
 
                 # insert data into buffer
                 data = obs, rewards, dones, values, actions, action_tokens, log_probs
@@ -101,16 +81,12 @@ class FctnCallingRunner:
                     global_step = total_num_steps + step * self.n_rollout_threads + i
                     if dones[i, 0]:
                         episodic_return = rewards[i, 0]
-                        self.writter.add_scalar(
-                            "episodic_return", episodic_return, global_step
-                        )
+                        self.writter.add_scalar("episodic_return", episodic_return, global_step)
 
-            # compute return and update network
+            torch.cuda.empty_cache()
             self.before_update()
-            train_infos = self.train()
+            train_infos = self.trainer.train(self.buffer)
             self.buffer.after_update()
-
-            # manually clear GPU cache to avoid OOM (memory fragmentation)
             torch.cuda.empty_cache()
 
             # post process
@@ -132,50 +108,28 @@ class FctnCallingRunner:
 
         # print("buffer: ", self.buffer.value_preds)
 
-    @torch.no_grad()
-    def collect(self, step):
-        actions, action_tokens, values, log_probs = self.agent.infer_for_rollout(
-            self.buffer.obs[self.buffer.cur_batch_index, step]
-        )
-
-        # # [self.envs, agents] for single agent maybe
-        # values = np.array(np.split(values, self.n_rollout_threads))
-        # actions = np.array(np.split(actions, self.n_rollout_threads))
-        # action_tokens = np.array(np.split(action_tokens, self.n_rollout_threads))
-        # log_probs = np.array(np.split(log_probs, self.n_rollout_threads))
-
-        return values, actions, action_tokens, log_probs
-
     def insert(self, data):
         obs, rewards, dones, values, actions, action_tokens, log_probs = data
 
         dones_env = np.all(dones, axis=1)
         masks = np.ones((self.n_rollout_threads, self.num_agents), dtype=np.float32)
-        masks[dones_env == True] = np.zeros(
-            ((dones_env == True).sum(), self.num_agents), dtype=np.float32
-        )
+        masks[dones_env == True] = np.zeros(((dones_env == True).sum(), self.num_agents), dtype=np.float32)
 
         if self.algo == "APPO":
-            self.buffer.insert_appo(
-                obs, actions, values, rewards, masks, action_tokens, log_probs
-            )
+            self.buffer.insert_appo(obs, actions, values, rewards, masks, action_tokens, log_probs)
         elif self.algo == "TPPO":
-            self.buffer.insert_tppo(
-                obs, actions, values, rewards, masks, action_tokens, log_probs
-            )
+            self.buffer.insert_tppo(obs, actions, values, rewards, masks, action_tokens, log_probs)
         else:
             raise NotImplementedError
 
     @torch.no_grad()
     def before_update(self):
         """Calculate returns for the collected data."""
-        next_values = self.agent.get_next_values(
-            self.buffer.obs[self.buffer.cur_batch_index, -1]
-        )
+        values = self.agent.get_next_values(self.buffer.obs[self.buffer.cur_batch_index, -1])
         if self.algo == "APPO":
-            self.buffer.batch_process_appo(next_values)
+            self.buffer.batch_process_appo(values)
         elif self.algo == "TPPO":
-            self.buffer.batch_process_tppo(next_values)
+            self.buffer.batch_process_tppo(values)
         else:
             raise NotImplementedError
 
@@ -183,45 +137,6 @@ class FctnCallingRunner:
         train_infos["average_step_rewards"] = np.mean(self.buffer.rewards)
         for k, v in train_infos.items():
             self.writter.add_scalars(k, {k: v}, total_num_steps)
-
-    @staticmethod
-    def worker_train(rank, world_size, args, agent, agent_num, buffer, child_conn):
-        setup(rank, world_size)
-        print(f"Creating trainer on process {rank} with world size {world_size}...")
-        if args.algorithm_name == "APPO":
-            trainer = APPOTrainer(args, agent, agent_num, rank)
-        elif args.algorithm_name == "TPPO":
-            trainer = TPPOTrainer(args, agent, agent_num, rank)
-        else:
-            raise NotImplementedError
-
-        train_infos = trainer.train(buffer)
-        if rank == 0:
-            child_conn.send(train_infos)
-
-    def train(self):
-        world_size = torch.cuda.device_count()
-        parent_conn, child_conn = mp.Pipe()
-        print(f"starting {world_size} processes for training...")
-        mp.spawn(
-            self.worker_train,
-            nprocs=world_size,
-            args=(
-                world_size,
-                self.all_args,
-                self.agent,
-                self.num_agents,
-                self.buffer,
-                child_conn,
-            ),
-            join=True,
-        )
-        while parent_conn.poll():
-            message = parent_conn.recv()
-            train_infos = message
-        del message
-
-        return train_infos
 
     @torch.no_grad()
     def eval(self, total_num_steps):
@@ -232,9 +147,7 @@ class FctnCallingRunner:
         while True:
             eval_actions, _ = self.agent.get_actions(np.concatenate(eval_obs))
             eval_actions = np.array(np.split(eval_actions, self.n_eval_rollout_threads))
-            eval_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(
-                eval_actions
-            )
+            eval_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(eval_actions)
 
             eval_dones_env = np.all(eval_dones, axis=1)
 

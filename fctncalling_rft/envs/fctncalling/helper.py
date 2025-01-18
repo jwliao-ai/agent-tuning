@@ -248,3 +248,20 @@ def get_executable_expected_output(ground_truth):
         )
         execution_result.append(exec_dict["result"])
     return execution_result
+
+def load_func_docs(involved_classes: list[str], func_doc_path: str, missed_function: dict):
+    functions = []
+    holdout_functions = {}
+    for class_name in involved_classes:
+        functions.extend(load_file(func_doc_path + MULTI_TURN_FUNC_DOC_FILE_MAPPING[class_name]))
+    for turn_index, missed_func_names in missed_function.items():
+        holdout_functions[turn_index] = []
+        for missed_func_name in missed_func_names:
+            for i, func_doc in enumerate(functions):
+                if func_doc["name"] == missed_func_name:
+                    # Add the missed function doc to the missed_function list
+                    holdout_functions[turn_index].append(func_doc)
+                    # Remove it from the function list
+                    functions.pop(i)
+                    break
+    return functions, holdout_functions

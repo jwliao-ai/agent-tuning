@@ -1,4 +1,4 @@
 from __future__ import annotations
-from .llama_lora_agent import LlamaLoRAgent
+from .actor import Actor
 
-__all__ = ["LlamaLoRAgent"]
+__all__ = ["Actor"]
