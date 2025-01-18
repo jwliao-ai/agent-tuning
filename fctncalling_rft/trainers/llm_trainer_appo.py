@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from abc import ABC
 import torch.nn.functional as F
-from codes.MadeAgents.fctncalling_rft.fctncalling_rft.agents.actor import Actor
+from fctncalling_rft.agents.actor import Actor
 from fctncalling_rft.utils.language_buffer import LanguageBuffer
 from fctncalling_rft.utils.util import get_gard_norm, huber_loss, mse_loss, to_cuda
 
@@ -81,7 +81,9 @@ class APPOTrainer(ABC):
         total_approx_kl = 0
         policy_loss = 0
         for start in range(0, batch_size, cp_batch_size):
-            end = start + cp_batch_size if end <= batch_size else batch_size
+            end = start + cp_batch_size 
+            if end > batch_size:
+                end = batch_size
             cp_weight = (end - start) / batch_size
             cp_obs_batch, cp_act_batch, cp_adv_batch, cp_log_probs_batch = observations[start:end], action_tokens[start:end], advantages[start:end], log_probs[start:end]
             log_prob_infer, entropy = self.agent.get_joint_action_log_probs(cp_obs_batch, cp_act_batch)

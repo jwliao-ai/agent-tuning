@@ -28,9 +28,12 @@ def huber_loss(e, d):
 def mse_loss(e):
     return e**2/2
 
-def to_cuda(x: torch.Tensor | np.ndarray | tuple):
+def to_cuda(x: torch.Tensor | np.ndarray | tuple) -> torch.Tensor | np.ndarray | tuple:
     if isinstance(x, np.ndarray):
-        return torch.from_numpy(x).cuda()
+        if x.dtype == np.object_:
+            return x
+        else:
+            return torch.from_numpy(x).cuda()
     elif isinstance(x, torch.Tensor):
         return x.cuda()
     elif isinstance(x, tuple):
