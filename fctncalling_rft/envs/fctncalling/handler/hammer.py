@@ -8,8 +8,11 @@ TASK_INSTRUCTION = """You are a tool calling assistant. In order to complete the
 1. Make one or more function/tool calls to meet the request based on the question.
 2. If none of the function can be used, point it out and refuse to answer.
 3. If the given question lacks the parameters required by the function, also point it out.
-"""
 
+The following are characters that may interact with you
+1. user: Provides query or additional information.
+2. tool: Returns the results of the tool calling.
+"""
 FORMAT_INSTRUCTION = """
 The output MUST strictly adhere to the following JSON format, and NO other text MUST be included.
 The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please directly output an empty list '[]'
@@ -72,21 +75,14 @@ class HammerHandler():
         tools = convert_to_format_tool(function)
 
         user_query = ""
+
         for message in messages:
-            user_query += f"{message['role']}: {message['content']}\n"
-        if messages[-1]["role"] != "user":
-            user_query += "user:  \n"
+            user_query += f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n"
 
         content = f"[BEGIN OF TASK INSTRUCTION]\n{TASK_INSTRUCTION}\n[END OF TASK INSTRUCTION]\n\n"
-        content += (
-            "[BEGIN OF AVAILABLE TOOLS]\n"
-            + json.dumps(tools)
-            + "\n[END OF AVAILABLE TOOLS]\n\n"
-        )
+        content += "[BEGIN OF AVAILABLE TOOLS]\n" + json.dumps(tools) + "\n[END OF AVAILABLE TOOLS]\n\n"
         content += f"[BEGIN OF FORMAT INSTRUCTION]\n{FORMAT_INSTRUCTION}\n[END OF FORMAT INSTRUCTION]\n\n"
-        content += f"[BEGIN OF QUERY]\n{user_query}\n[END OF QUERY]\n\n"
-
-        return f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
+        return f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{content}<|im_end|>\n{user_query}<|im_start|>assistant\n"
 
     def decode_ast(self, result, language: str = "Python"):
         result = result.replace("```", "")
@@ -121,9 +117,7 @@ class HammerHandler():
             if isinstance(tool_call, dict):
                 name = tool_call.get("name", "")
                 arguments = tool_call.get("arguments", {})
-                args_str = ", ".join(
-                    [f"{key}={repr(value)}" for key, value in arguments.items()]
-                )
+                args_str = ", ".join([f"{key}={repr(value)}" for key, value in arguments.items()])
                 python_format.append(f"{name}({args_str})")
 
         return python_format
