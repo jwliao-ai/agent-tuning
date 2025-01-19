@@ -58,26 +58,39 @@ class APPOTrainer(ABC):
         sample = to_cuda(sample)
         observations, actions, log_probs, value_preds, returns, advantages, action_tokens = sample
         batch_size = observations.shape[0]
-        print(f"[trainer] batch_size: {batch_size}")
+        cp_batch_size = int(batch_size // self.gradient_cp_steps)
+        if cp_batch_size == 0:
+            print(f"gradient_cp_steps > batch_size, set cp_batch_size = 1")
+            cp_batch_size = 1
+        # print(f"[trainer] batch_size: {batch_size}")
+        # print(f"[trainer] cp_batch_size: {cp_batch_size}")
 
-        # critic update
-        values_infer = self.agent.get_action_values(observations)
-        values_infer = values_infer.view(batch_size, -1)
-        value_loss = self.cal_value_loss(values_infer, value_preds, returns)
+        torch.cuda.empty_cache()
+        # critic update with checkpoint gradient accumulation
         self.critic_optimizer.zero_grad()
-        value_loss.backward()
+        value_loss = 0
+        for start in range(0, batch_size, cp_batch_size):
+            end = start + cp_batch_size
+            if end > batch_size:
+                end = batch_size
+            cp_weight = (end - start) / batch_size  # Weight for the chunk loss
+            cp_obs_batch, cp_value_preds_batch, cp_returns_batch = observations[start:end], value_preds[start:end], returns[start:end]
+            values_infer = self.agent.get_action_values(cp_obs_batch)
+            cp_value_loss = self.cal_value_loss(values_infer, cp_value_preds_batch, cp_returns_batch)
+            cp_value_loss = cp_value_loss * cp_weight  # Scale the loss by the chunk weight
+            cp_value_loss.backward()
+            value_loss += cp_value_loss.item()
+        # Gradient clipping
         if self._use_max_grad_norm:
             critic_grad_norm = nn.utils.clip_grad_norm_(self.agent.critic.parameters(), self.max_grad_norm)
         else:
             critic_grad_norm = get_gard_norm(self.agent.critic.parameters())
         self.critic_optimizer.step()
-        value_loss = value_loss.item()
         critic_grad_norm = critic_grad_norm.item()
 
+        torch.cuda.empty_cache()
         # policy update
         self.policy_optimizer.zero_grad()
-        cp_batch_size = int(batch_size // self.gradient_cp_steps)
-        print(f"[trainer] cp_batch_size: {cp_batch_size}")
         total_approx_kl = 0
         policy_loss = 0
         for start in range(0, batch_size, cp_batch_size):
@@ -101,27 +114,27 @@ class APPOTrainer(ABC):
         self.policy_optimizer.step()
         policy_grad_norm = policy_grad_norm.item()
 
-        return value_loss, critic_grad_norm, cp_policy_loss, policy_grad_norm
+        return value_loss, critic_grad_norm, policy_loss, policy_grad_norm
 
     def train(self, buffer: LanguageBuffer):
         """
         Perform a training update using minibatch GD.
         :param buffer: (SharedReplayBuffer) buffer containing training data.
-        :param update_actor: (bool) whether to update actor network.
 
         :return train_info: (dict) contains information regarding training update (e.g. loss, grad norms, etc).
         """
-        train_info = {}
-        train_info["value_loss"] = 0
-        train_info["value_grad_norm"] = 0
-        train_info["policy_loss"] = 0
-        train_info["policy_grad_norm"] = 0
+        train_info = {
+            "value_loss": 0,
+            "value_grad_norm": 0,
+            "policy_loss": 0,
+            "policy_grad_norm": 0
+        }
 
         update_time = 0
         for _ in range(self.ppo_epoch):
             data_generator = buffer.appo_sampler(self.num_mini_batch)
             for sample in data_generator:
-                value_loss, value_grad_norm, policy_loss, policy_grad_norm = (self.ppo_update(sample))
+                value_loss, value_grad_norm, policy_loss, policy_grad_norm = self.ppo_update(sample)
                 train_info["value_loss"] += value_loss
                 train_info["value_grad_norm"] += value_grad_norm
                 train_info["policy_loss"] += policy_loss

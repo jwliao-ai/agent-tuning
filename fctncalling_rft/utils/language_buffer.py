@@ -96,19 +96,12 @@ class LanguageBuffer(object):
             for agent in reversed(range(self.num_agents)):
                 delta = (
                     self.rewards[self.cur_batch_index, step, :, agent]
-                    + self.gamma
-                    * self.action_level_v_values[
-                        self.cur_batch_index, step + 1, :, agent
-                    ]
-                    * self.masks[self.cur_batch_index, step + 1, :, agent]
+                    + self.gamma * self.action_level_v_values[self.cur_batch_index, step + 1, :, agent] * self.masks[self.cur_batch_index, step + 1, :, agent]
                     - self.action_level_v_values[self.cur_batch_index, step, :, agent]
                 )
                 gae = (
                     delta
-                    + self.gamma
-                    * self.gae_lambda
-                    * self.masks[self.cur_batch_index, step + 1, :, agent]
-                    * gae
+                    + self.gamma * self.gae_lambda * self.masks[self.cur_batch_index, step + 1, :, agent] * gae
                 )
                 self.action_level_returns[self.cur_batch_index, step, :, agent] = (
                     self.action_level_v_values[self.cur_batch_index, step, :, agent]

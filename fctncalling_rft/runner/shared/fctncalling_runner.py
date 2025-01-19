@@ -1,16 +1,11 @@
-import time
 import os
 import numpy as np
-from functools import reduce
 from tqdm import tqdm
 import torch
 from tensorboardX import SummaryWriter
 from fctncalling_rft.agents import Actor
 from fctncalling_rft.utils import LanguageBuffer
 from fctncalling_rft.trainers import APPOTrainer, TPPOTrainer
-
-def _t2n(x):
-    return x.detach().cpu().numpy()
 
 class FctnCallingRunner:
     """Runner class to perform training, evaluation. and data collection. See parent class for details."""
@@ -63,14 +58,15 @@ class FctnCallingRunner:
         for episode in range(episodes):
             total_num_steps = (episode + 1) * self.episode_length * self.n_rollout_threads
             for step in range(self.episode_length):
+                torch.cuda.empty_cache()
                 actions, action_tokens, values, log_probs = self.agent.infer_for_rollout(self.buffer.obs[self.buffer.cur_batch_index, step])
 
                 # here suppose each agent gets the same reward
                 obs, rewards, dones, infos = self.envs.step(actions)
 
-                tokenized_obs = self.agent.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True)
-                num_tokens = tokenized_obs["input_ids"].shape[1]
-                print(f"[run] num_tokens: {num_tokens}")
+                # tokenized_obs = self.agent.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True)
+                # num_tokens = tokenized_obs["input_ids"].shape[1]
+                # print(f"[run] num_tokens: {num_tokens}")
 
                 # insert data into buffer
                 data = obs, rewards, dones, values, actions, action_tokens, log_probs

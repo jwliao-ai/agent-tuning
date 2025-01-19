@@ -19,7 +19,6 @@ def make_train_env(all_args):
     def get_env_fn(rank):
         def init_env():
             env = FctnCallingEnv(
-                flag=all_args.flag,
                 rank=rank,
                 model_name=all_args.model_name,
                 num_agents=all_args.n_agents,
@@ -38,7 +37,12 @@ def make_train_env(all_args):
 def make_eval_env(all_args):
     def get_env_fn(rank):
         def init_env():
-            env = FctnCallingEnv(flag=all_args.flag, rank=rank, model_name=all_args.model_name, num_agents=all_args.n_agents, dataset_path=all_args.dataset_path,)
+            env = FctnCallingEnv(
+                rank=rank, 
+                model_name=all_args.model_name, 
+                num_agents=all_args.n_agents, 
+                dataset_path=all_args.dataset_path
+            )
             env.seed(all_args.seed + rank * 5000)
             return env
         return init_env
@@ -46,27 +50,13 @@ def make_eval_env(all_args):
 
 
 def parse_args(args, parser):
-    parser.add_argument(
-        "--env_name", type=str, default="fctncalling_env", help="Which env to run on"
-    )
-    parser.add_argument(
-        "--dataset_name", type=str, default="xlam", help="Which dataset to test on"
-    )
-    parser.add_argument(
-        "--dataset_path", type=str, required=True, help="path to dataset"
-    )
-    parser.add_argument(
-        "--flag", type=str, default="train", help="flag to distinguish different runs"
-    )
-    parser.add_argument(
-        "--model_type", type=str, default="llama",required=False, help="the model architecture"
-    )
-    parser.add_argument(
-        "--model_name_or_path", type=str, required=True, help="Which model to use"
-    )
-    parser.add_argument(
-        "--max_new_tokens", type=int, default=256, help="max_new_tokens"
-    )
+    parser.add_argument("--env_name", type=str, default="fctncalling_env", help="Which env to run on")
+    parser.add_argument("--dataset_name", type=str, default="xlam", help="Which dataset to test on")
+    parser.add_argument("--dataset_path", type=str, required=True, help="path to dataset")
+    parser.add_argument("--flag", type=str, default="train", help="flag to distinguish different runs")
+    parser.add_argument("--model_type", type=str, default="llama",required=False, help="the model architecture")
+    parser.add_argument("--model_name_or_path", type=str, required=True, help="Which model to use")
+    parser.add_argument("--max_new_tokens", type=int, default=256, help="max_new_tokens")
     parser.add_argument("--vacab_size", type=int, default=32016)
     parser.add_argument("--gradient_cp_steps", type=int, default=1)
 
@@ -110,7 +100,6 @@ def build_run_dir(all_args):
 def main(args):
     parser = get_config()
     all_args = parse_args(args, parser)
-    all_args.episode_length = 8
     all_args.log_interval = 1
     all_args.n_agents = 1
 
