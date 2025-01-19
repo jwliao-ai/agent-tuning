@@ -21,7 +21,7 @@ from fctncalling_rft.envs.fctncalling.checker.executable.custom_exception import
 
 class FctnCallingEnv:
 
-    def __init__(self, flag, rank, model_name, num_agents, dataset_path, no_nan=True):
+    def __init__(self, rank, model_name, num_agents, dataset_path, no_nan=True):
         self.rank = rank
         self.no_nan = no_nan
         self.n_agents = num_agents
@@ -29,6 +29,7 @@ class FctnCallingEnv:
         self.handler = HammerHandler(model_name=model_name)
         self.api_sanity_check = False
         self.dataset = []
+        self.max_steps = 4
         with open(dataset_path, "r") as f:
             self.dataset = json.load(f)
         self.func_doc_path = "/home/ljw/codes/MadeAgents/fctncalling_rft/fctncalling_rft/envs/fctncalling/multi_turn_func_doc/"
@@ -51,14 +52,14 @@ class FctnCallingEnv:
         self.question: list[list[dict]] = self.entry["question"]
         if not is_relevance_or_irrelevance(self.category):
             self.ground_truth = self.entry["ground_truth"]  # list[dict] for single-turn or list[list[str]] for multi-turn)
-        self.turn_count = 0
-        self.max_turns = len(self.question)
 
         if is_chatable(self.category) or is_sql(self.category):  # not support now
             self.reset()
 
         if is_multi_turn(self.category):
-            self.task_progress = 0
+            self.task_progress = 1
+            self.steps_in_turn = 1
+            self.func_calls_in_turns = [[] for _ in range(len(self.question))]
             self.initial_config = self.entry['initial_config']
             self.involved_classes = self.entry['involved_classes']
             self.function, self.holdout_function = load_func_docs(self.involved_classes, self.func_doc_path, self.entry.get("missed_function", {}))
@@ -97,21 +98,13 @@ class FctnCallingEnv:
                 self.API_TESTED = True
 
             if not is_rest(self.category):
-                self.entry["execution_result"] = get_executable_expected_output(
-                    self.ground_truth
-                )
+                self.entry["execution_result"] = get_executable_expected_output(self.ground_truth)
 
         self.history = self.handler._pre_query_processing_prompting(self.entry)
-        self.history = self.handler.add_first_turn_message_prompting(
-            self.history, self.question[0]
-        )
-        formatted_prompt = self.handler.format_prompt(
-            self.history["message"], self.history["function"]
-        )
+        self.history = self.handler.add_first_turn_message_prompting(self.history, self.question[0])
+        formatted_prompt = self.handler.format_prompt(self.history["message"], self.history["function"])
 
-        obs = np.array(
-            [formatted_prompt for _ in range(self.n_agents)], dtype=np.object_
-        )
+        obs = np.array([formatted_prompt for _ in range(self.n_agents)], dtype=np.object_)
 
         return obs
 
@@ -135,13 +128,7 @@ class FctnCallingEnv:
 
         next_obs, rewards, dones = self.transition_and_reward(results)
 
-        infos = [
-            {
-                "history": self.history,
-                "traj_length": self.turn_count,
-            }
-            for _ in range(self.n_agents)
-        ]
+        infos = [{"history": self.history, "traj_length": self.task_progress} for _ in range(self.n_agents)]
         return next_obs, rewards, dones, infos
 
     def render(self, **kwargs):
@@ -193,14 +180,10 @@ class FctnCallingEnv:
         }
         if not success:
             if "irrelevance" in self.category:
-                result["error"] = [
-                    f"Valid syntax. Successfully decode AST when it should not."
-                ]
+                result["error"] = [f"Valid syntax. Successfully decode AST when it should not."]
                 result["error_type"] = "irrelevance_error:decoder_success"
             else:
-                result["error"] = [
-                    f"Invalid syntax. Failed to decode AST when it should have. {decode_error}"
-                ]
+                result["error"] = [f"Invalid syntax. Failed to decode AST when it should have. {decode_error}"]
                 result["error_type"] = "relevance_error:decoder_failed"
         return result
 
@@ -275,22 +258,20 @@ class FctnCallingEnv:
 
     def multi_turn_check(self, action) -> dict:
         decode_error = None
-        tmp_ground_truth = self.ground_truth[self.task_progress]
+        tmp_ground_truth = self.ground_truth[:self.task_progress]
         action_list_decoded = []
 
         try:
             action_list_decoded = self.handler.decode_execute(action)
-            if is_empty_execute_response(
-                action_list_decoded
-            ) and not is_empty_execute_response(tmp_ground_truth):
+            self.func_calls_in_turns[self.task_progress - 1].append(action_list_decoded)
+            if is_empty_execute_response(action_list_decoded) and not is_empty_execute_response(self.ground_truth[self.task_progress - 1]):
+                self.history['message'].extend([{"role": "system", "content": f"Some more functions should be called to solve the user's query."}])
                 return {
                     "id": self.id,
                     "model_name": self.model_name,
                     "test_category": self.category,
                     "valid": False,
-                    "error": [
-                        "Assistant response is decoded as empty because of not following the format instructions."
-                    ],
+                    "error": ["Assistant response is decoded as empty because of not following the format instructions."],
                     "error_type": "multi_turn_decoder:empty_response",
                     "prompt": self.entry,
                     "action_raw": str(action),
@@ -298,6 +279,7 @@ class FctnCallingEnv:
                 }
         except Exception as e:
             decode_error = str(e)
+            self.history["message"].extend([{"role": "system", "content": "Assistant's response cannot be decoded: " + decode_error}])
             return {
                 "id": self.id,
                 "model_name": self.model_name,
@@ -310,18 +292,15 @@ class FctnCallingEnv:
             }
 
         multi_turn_result = multi_turn_checker(
-            action_list_decoded,
-            tmp_ground_truth,
-            self.entry,
-            self.category,
-            self.model_name,
-            self.task_progress,
-        )
+            self.func_calls_in_turns[:self.task_progress], 
+            self.ground_truth[:self.task_progress], 
+            self.entry, 
+            self.category, 
+            self.model_name
+            )
 
         if contain_multi_turn_irrelevance(self.category):
-            irrelevance_result = multi_turn_irrelevance_checker(
-                action_list_decoded, tmp_ground_truth, self.task_progress
-            )
+            irrelevance_result = multi_turn_irrelevance_checker(action_list_decoded, tmp_ground_truth, self.task_progress)
         else:
             irrelevance_result = {"valid": True}
 
@@ -336,20 +315,14 @@ class FctnCallingEnv:
         elif not irrelevance_result["valid"] and not multi_turn_result["valid"]:
             valid = False
             error = [irrelevance_result["error"] + "\n" + multi_turn_result["error"]]
-            error_type = (
-                irrelevance_result["error_type"]
-                + "\n"
-                + multi_turn_result["error_type"]
-            )
+            error_type = irrelevance_result["error_type"] + "\n" + multi_turn_result["error_type"]
         else:
             valid = True
             error = []
             error_type = ""
 
+        self.history["message"].append({"role": "tool", "content": multi_turn_result["latest_step_execution_result"]})
         if valid:
-            self.history["message"].append(
-                {"role": "tool", "content": multi_turn_result["execution_results"]}
-            )
             return {
                 "id": self.id,
                 "model_name": self.model_name,
@@ -360,6 +333,7 @@ class FctnCallingEnv:
                 "action_decoded": str(action_list_decoded),
                 "ground_truth": tmp_ground_truth,
                 "execution_results": multi_turn_result["execution_results"],
+                "latest_step_execution_result": multi_turn_result["latest_step_execution_result"],
             }
         else:
             return {
@@ -373,6 +347,8 @@ class FctnCallingEnv:
                 "action_raw": str(action),
                 "action_decoded": str(action_list_decoded),
                 "ground_truth": tmp_ground_truth,
+                "execution_results": multi_turn_result["execution_results"],
+                "latest_step_execution_result": multi_turn_result["latest_step_execution_result"],
             }
 
     def ast_check(self, action) -> dict:
@@ -421,72 +397,60 @@ class FctnCallingEnv:
                 "model_name": self.model_name,
                 "test_category": self.category,
                 "valid": checker_result["valid"],
-                "error": (
-                    checker_result["error"] if not checker_result["valid"] else None
-                ),
-                "error_type": (
-                    checker_result["error_type"]
-                    if not checker_result["valid"]
-                    else None
-                ),
+                "error": (checker_result["error"] if not checker_result["valid"] else None),
+                "error_type": checker_result["error_type"] if not checker_result["valid"] else None,
                 "prompt": self.entry,
                 "action_raw": str(action),
                 "action_decoded": str(decoded_action),
                 "ground_truth": self.ground_truth,
             }
 
-    def transition_and_reward(self, results: list[dict]):
+    def transition_and_reward(self, results: list[dict] | dict):
         obs = ""
         bug_free = True
-        error_num = 0.0
-        check_point_num = float(len(results))
-        self.turn_count += 1
-        for result in results:
-            if not result["valid"]:
-                bug_free = False
-                error_num += 1
-                obs += f"{result['error'][0]}\n"
-                dones = np.zeros((self.n_agents), dtype=bool)
-
-        if not bug_free:
-            self.history["message"].extend([{"role": "system", "content": obs}])
+        if isinstance(results, list) and len(results) == 1:
+            result = results[0]
         else:
-            if is_multi_turn(self.category):
+            result = results
+        if not result["valid"]:
+            bug_free = False
+
+        if is_multi_turn(self.category):
+            if bug_free:
+                # update task progress to next turn
                 self.task_progress += 1
-                if self.task_progress >= len(self.ground_truth):
+                if self.task_progress > len(self.ground_truth):
+                    # if no more questions
                     dones = np.ones((self.n_agents), dtype=bool)
-                    obs = "Well done!"
+                    obs = "Well done! All the questions have been correctly answered."
                 else:
+                    # if there are more questions
                     dones = np.zeros((self.n_agents), dtype=bool)
                     if str(self.task_progress) in self.holdout_function:
-                        obs = DEFAULT_USER_PROMPT_FOR_ADDITIONAL_FUNCTION_PROMPTING.format(
-                            functions=self.holdout_function[str(self.task_progress)]
-                        )
+                        obs = DEFAULT_USER_PROMPT_FOR_ADDITIONAL_FUNCTION_PROMPTING.format(functions=self.holdout_function[str(self.task_progress)])
                     else:
-                        obs = self.question[self.task_progress][0]["content"]
+                        obs = self.question[self.task_progress - 1][0]["content"]
+                rewards = [0 if idx != self.n_agents - 1 else 1 for idx in range(self.n_agents)]
+                self.history["message"].extend([{"role": "user", "content": obs}])
+                self.steps_in_turn = 1 # reset steps for next turn
             else:
-                obs = "Well done!"
-                dones = np.ones((self.n_agents), dtype=bool)
-            self.history["message"].extend([{"role": "user", "content": obs}])
-            obs = self.handler.format_prompt(
-                self.history["message"], self.history["function"]
-            )
+                if self.steps_in_turn < self.max_steps:
+                    # error but still within self.max_steps
+                    dones = np.zeros((self.n_agents), dtype=bool)
+                    obs = result["error"][0]
+                    rewards = [0 for _ in range(self.n_agents)]
+                    self.steps_in_turn += 1
+                else:
+                    # force reset if cannot complete the query of this turn within self.max_steps
+                    dones = np.ones((self.n_agents), dtype=bool)
+                    obs = result["error"][0]
+                    rewards = [0 if idx != self.n_agents - 1 else -1 for idx in range(self.n_agents)]
+                    self.steps_in_turn = 1
 
-        # force reset when reaching max turns
-        if self.turn_count >= self.max_turns or not bug_free:
-            dones = np.ones((self.n_agents), dtype=bool)
-
-        # if dones == np.ones((self.n_agents), dtype=bool):
-        #     pprint.pp(self.history["message"])
-
+        obs = self.handler.format_prompt(self.history['message'], self.history['function'])
         next_obs = np.array([obs for _ in range(self.n_agents)], dtype=np.object_)
-        rewards = [
-            0 if agent_idx != self.n_agents - 1 else (1.0 - error_num / check_point_num)
-            for agent_idx in range(self.n_agents)
-        ]
-        if not bug_free:
-            rewards = [
-                0 if agent_idx != self.n_agents - 1 else -1
-                for agent_idx in range(self.n_agents)
-            ]
+        # if dones == np.ones((self.n_agents), dtype=bool):
+        #     print("$" * 50)
+        #     pprint.pp(self.history['message'])
+        #     print("$" * 50)
         return next_obs, rewards, dones
