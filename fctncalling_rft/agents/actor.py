@@ -28,11 +28,11 @@ class Actor:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
             self.base_model.config.pad_token_id = self.tokenizer.pad_token_id
         self.max_new_tokens = max_new_tokens
-        # self.roles = [
-        #     "Thoughts: ",
-        #     "\nDirectly call tools (strictly follow the format): ",
-        # ]
-        self.roles = [""]
+        self.roles = [
+            "Let's think step by step. ",
+            "\nDirectly call tools (strictly follow the format): \n",
+        ]
+        # self.roles = [""]
 
         if load_path is None:
             self.actor = self._init_actor().to(self.device)
@@ -407,7 +407,7 @@ class Actor:
             next_action_values = self.get_action_values(obs)
             next_values = next_action_values.cpu().float().numpy()
         elif self.algo == "TPPO":
-            next_token_values = self.get_next_tppo_values(obs).squeeze(-1)
+            next_token_values = self.get_next_tppo_values(obs)
             next_values = next_token_values.cpu().float().numpy()
         else:
             raise NotImplementedError

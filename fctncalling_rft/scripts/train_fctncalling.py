@@ -90,7 +90,7 @@ def build_run_dir(all_args):
             curr_run = "run_1"
         else:
             curr_run = "run_%i" % (max(exst_run_nums) + 1)
-    curr_run += f"_ppoepoch{all_args.ppo_epoch}_lr{all_args.lr}_minibatch{all_args.num_mini_batch}_criticlr{all_args.critic_lr}_valuelosscoef{all_args.value_loss_coef}_ent{all_args.entropy_coef}_seed{all_args.seed}"
+    curr_run += f"_nagents{all_args.n_agents}_ppoepoch{all_args.ppo_epoch}_lr{all_args.lr}_minibatch{all_args.num_mini_batch}_criticlr{all_args.critic_lr}_valuelosscoef{all_args.value_loss_coef}_ent{all_args.entropy_coef}_seed{all_args.seed}"
     run_dir = run_dir / curr_run
     if not run_dir.exists():
         os.makedirs(str(run_dir))

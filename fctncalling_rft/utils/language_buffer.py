@@ -94,26 +94,22 @@ class LanguageBuffer(object):
         gae = 0
         for step in reversed(range(self.episode_length)):
             for agent in reversed(range(self.num_agents)):
-                delta = (
-                    self.rewards[self.cur_batch_index, step, :, agent]
-                    + self.gamma * self.action_level_v_values[self.cur_batch_index, step + 1, :, agent] * self.masks[self.cur_batch_index, step + 1, :, agent]
-                    - self.action_level_v_values[self.cur_batch_index, step, :, agent]
-                )
-                gae = (
-                    delta
-                    + self.gamma * self.gae_lambda * self.masks[self.cur_batch_index, step + 1, :, agent] * gae
-                )
-                self.action_level_returns[self.cur_batch_index, step, :, agent] = (
-                    self.action_level_v_values[self.cur_batch_index, step, :, agent]
-                    + gae
-                )
+                if agent == self.num_agents - 1:
+                    delta = self.rewards[self.cur_batch_index, step, :, agent] \
+                        + self.gamma * self.action_level_v_values[self.cur_batch_index, step + 1, :, 0] * self.masks[self.cur_batch_index, step + 1, :, 0] \
+                        - self.action_level_v_values[self.cur_batch_index, step, :, agent]
+                    gae = delta + self.gamma * self.gae_lambda * self.masks[self.cur_batch_index, step + 1, :, 0] * gae
+                else:
+                    delta = self.rewards[self.cur_batch_index, step, :, agent] \
+                        + self.gamma * self.action_level_v_values[self.cur_batch_index, step, :, agent + 1] * self.masks[self.cur_batch_index, step, :, agent + 1] \
+                        - self.action_level_v_values[self.cur_batch_index, step, :, agent]
+                    gae = delta + self.gamma * self.gae_lambda * self.masks[self.cur_batch_index, step, :, agent + 1] * gae
+                self.action_level_returns[self.cur_batch_index, step, :, agent] = self.action_level_v_values[self.cur_batch_index, step, :, agent] + gae
                 self.action_level_advantages[self.cur_batch_index, step, :, agent] = gae
-
         self.cur_num_batch = self.cur_num_batch + 1 if self.cur_num_batch < self.max_batch else self.max_batch
 
     def batch_process_tppo(self, next_value):
         self.tppo_values[self.cur_batch_index, -1, :, :, 0] = next_value
-
         for thread in range(self.n_rollout_threads):
             gae = 0
             for step in reversed(range(self.episode_length)):
@@ -123,8 +119,12 @@ class LanguageBuffer(object):
                         rew = self.rewards[self.cur_batch_index, step, thread, agent]
                         v = self.tppo_values[self.cur_batch_index, step, thread, agent, token]
                         if token == last_token:
-                            v_next = self.tppo_values[self.cur_batch_index, step + 1, thread, agent, 0]
-                            mask_next = self.masks[self.cur_batch_index, step + 1, thread, agent]
+                            if agent == self.num_agents - 1:
+                                v_next = self.tppo_values[self.cur_batch_index, step + 1, thread, 0, 0]
+                                mask_next = self.masks[self.cur_batch_index, step + 1, thread, 0]
+                            else:
+                                v_next = self.tppo_values[self.cur_batch_index, step, thread, agent + 1, 0]
+                                mask_next = self.masks[self.cur_batch_index, step, thread, agent + 1]
                             delta = rew + self.gamma * v_next * mask_next - v
                             gae = delta + self.gamma * self.gae_lambda * mask_next * gae
                         else:
@@ -132,12 +132,10 @@ class LanguageBuffer(object):
                             if self.algo == "POAD":
                                 delta = v_next - v
                             else:
-                                # for NTPO
                                 delta = self.gamma * v_next - v
                             gae = delta + self.gamma * self.gae_lambda * gae
-                        self.tppo_returns[self.cur_batch_index, step, thread, agent, token] = (gae + v)
+                        self.tppo_returns[self.cur_batch_index, step, thread, agent, token] = gae + v
                         self.tppo_advantages[self.cur_batch_index, step, thread, agent, token] = gae
-
         self.cur_num_batch = self.cur_num_batch + 1 if self.cur_num_batch < self.max_batch else self.max_batch
 
     def appo_sampler(self, num_mini_batch: int = None, mini_batch_size: int = None):
