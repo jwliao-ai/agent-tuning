@@ -34,8 +34,7 @@ class FctnCallingRunner:
         self.envs = config["envs"]
         self.eval_envs = config["eval_envs"]
 
-        self.agent = Actor(self.all_args.model_name_or_path, self.all_args.max_new_tokens, self.algo,)
-
+        self.agent = Actor(self.all_args.model_name_or_path, self.all_args.max_new_tokens, self.num_agents, self.algo)
         self.buffer = LanguageBuffer(self.all_args, self.num_agents, self.agent.tokenizer.pad_token_id)
 
         if self.algo == "APPO":
@@ -76,7 +75,7 @@ class FctnCallingRunner:
                 for i in range(self.n_rollout_threads):
                     global_step = total_num_steps + step * self.n_rollout_threads + i
                     if dones[i, 0]:
-                        episodic_return = rewards[i, 0]
+                        episodic_return = rewards[i, -1]
                         self.writter.add_scalar("episodic_return", episodic_return, global_step)
 
             torch.cuda.empty_cache()
@@ -102,8 +101,6 @@ class FctnCallingRunner:
             if self.all_args.use_eval and episode % self.all_args.eval_interval == 0:
                 self.eval(total_num_steps)
 
-        # print("buffer: ", self.buffer.value_preds)
-
     def insert(self, data):
         obs, rewards, dones, values, actions, action_tokens, log_probs = data
 
@@ -122,6 +119,7 @@ class FctnCallingRunner:
     def before_update(self):
         """Calculate returns for the collected data."""
         values = self.agent.get_next_values(self.buffer.obs[self.buffer.cur_batch_index, -1])
+        # print(f"[before_update] values: {values.shape}") #(rollout_threads, 1)
         if self.algo == "APPO":
             self.buffer.batch_process_appo(values)
         elif self.algo == "TPPO":

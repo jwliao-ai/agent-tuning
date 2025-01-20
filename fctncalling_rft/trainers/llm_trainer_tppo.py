@@ -110,6 +110,8 @@ class TPPOTrainer:
             cp_value_loss *= cp_weight
             cp_value_loss.backward()
             value_loss += cp_value_loss.item()
+            del cp_obs_batch, cp_action_tokens_batch, cp_value_preds_batch, cp_returns_batch, cp_token_mask
+            torch.cuda.empty_cache()
         if self._use_max_grad_norm:
             critic_grad_norm = nn.utils.clip_grad_norm_(self.agent.critic.parameters(), self.max_grad_norm)
         else:
@@ -143,6 +145,8 @@ class TPPOTrainer:
             cp_policy_loss *= cp_weight
             cp_policy_loss.backward()
             policy_loss += cp_policy_loss.item()
+            del cp_obs_batch, cp_action_tokens_batch, cp_adv_batch, cp_log_prob_batch, cp_token_mask
+            torch.cuda.empty_cache()
         if total_approx_kl > 0.02:
             return value_loss, critic_grad_norm, 0, 0, 0
         policy_grad_norm = nn.utils.clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)

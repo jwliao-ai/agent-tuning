@@ -18,9 +18,10 @@ from fctncalling_rft.models.critic import APPOCritic, TPPOCritic
 
 class Actor:
 
-    def __init__(self, model_name, max_new_tokens, algo, load_path=None):
+    def __init__(self, model_name, max_new_tokens, algo, num_agents, load_path=None):
         self.device = "cuda:0"
         self.algo = algo
+        self.num_agents = num_agents
         self.base_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map=self.device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, padding_side="left")
         if self.tokenizer.pad_token is None:
@@ -28,11 +29,14 @@ class Actor:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
             self.base_model.config.pad_token_id = self.tokenizer.pad_token_id
         self.max_new_tokens = max_new_tokens
-        self.roles = [
-            "Let's think step by step. ",
-            "\nDirectly call tools (strictly follow the format): \n",
-        ]
-        # self.roles = [""]
+        if num_agents == 1:
+            self.roles = [""]
+        if num_agents == 2:
+            self.roles = [
+                "Let's think step by step. ",
+                "\nDirectly call tools (strictly follow the format): \n",
+            ]
+
 
         if load_path is None:
             self.actor = self._init_actor().to(self.device)
@@ -163,7 +167,7 @@ class Actor:
 
         return all_actions, all_action_tokens
 
-    def get_action_values(self, obs: np.ndarray) -> torch.Tensor:
+    def get_action_values(self, obs: np.ndarray, max_tokens: int = 4096) -> torch.Tensor:
         """
         Args:
             obs: np.ndarray of shape (rollout_threads, num_agents)
@@ -171,7 +175,7 @@ class Actor:
         Returns:
             action_values: torch.Tensor of shape (rollout_threads, num_agents, 1)
         """
-        inputs = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True)
+        inputs = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, truncation=True, max_length=max_tokens)
         input_ids = inputs["input_ids"].cuda()
         attention_mask = inputs["attention_mask"].cuda()
 
@@ -201,7 +205,7 @@ class Actor:
                 sliced_logits[thread_idx, agent_idx, : act_real_lengths[thread_idx, agent_idx]] = logits[thread_idx, start_idx:end_idx]
         return sliced_logits
 
-    def get_token_values(self, obs: np.ndarray, action_tokens: torch.Tensor, train: bool = False) -> torch.Tensor:
+    def get_token_values(self, obs: np.ndarray, action_tokens: torch.Tensor, train: bool = False, max_tokens: int = 4096) -> torch.Tensor:
         """
         Args:
             obs: np.ndarray of shape (rollout_threads/batch_size, num_agents)
@@ -210,7 +214,7 @@ class Actor:
         Returns:
             token_values: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, data_dim)
         """
-        obs_token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True)
+        obs_token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, max_length=max_tokens, truncation=True)
         # shape (rollout_threads, obs_token_len)
         obs_input_ids = obs_token_seq["input_ids"].cuda()
         obs_attn_mask = obs_token_seq["attention_mask"].cuda()
@@ -242,7 +246,7 @@ class Actor:
         token_values = self.get_slice(token_values, obs_full_lengths, act_real_lengths)
         return token_values
 
-    def get_token_logits(self, obs: np.ndarray, action_tokens: torch.Tensor, batch_infer: bool = False,) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_token_logits(self, obs: np.ndarray, action_tokens: torch.Tensor, batch_infer: bool = False, max_tokens: int = 4096) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             obs: np.ndarray of shape (rollout_threads/batch_size, num_agents)
@@ -252,7 +256,7 @@ class Actor:
             pi_logits: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
             rho_logits: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
         """
-        obs_token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True)
+        obs_token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, max_length=max_tokens, truncation=True)
         # shape (rollout_threads, obs_token_len)
         obs_input_ids = obs_token_seq["input_ids"].cuda()
         obs_attn_mask = obs_token_seq["attention_mask"].cuda()

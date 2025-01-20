@@ -59,6 +59,8 @@ def parse_args(args, parser):
     parser.add_argument("--max_new_tokens", type=int, default=256, help="max_new_tokens")
     parser.add_argument("--vacab_size", type=int, default=32016)
     parser.add_argument("--gradient_cp_steps", type=int, default=1)
+    parser.add_argument("--n_agents", type=int, default=1)
+    parser.add_argument("--log_interval", type=int, default=1)
 
     all_args = parser.parse_known_args(args)[0]
     all_args.model_name = Path(all_args.model_name_or_path).parts[-1]
@@ -100,8 +102,6 @@ def build_run_dir(all_args):
 def main(args):
     parser = get_config()
     all_args = parse_args(args, parser)
-    all_args.log_interval = 1
-    all_args.n_agents = 1
 
     run_dir = build_run_dir(all_args)
     print(f"------ run dir: {run_dir} ------")
