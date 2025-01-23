@@ -1,21 +1,13 @@
-import sys
 import json
 import numpy as np
 import random
-import re
-import pprint
+from pathlib import Path
 from fctncalling_rft.envs.fctncalling.utils import *
 from fctncalling_rft.envs.fctncalling.helper import *
 from fctncalling_rft.envs.fctncalling.handler.hammer import HammerHandler
 from fctncalling_rft.envs.fctncalling.checker.ast.ast_checker import ast_checker
-from fctncalling_rft.envs.fctncalling.checker.executable.executable_checker import (
-    executable_checker_rest,
-    executable_checker_non_rest,
-)
-from fctncalling_rft.envs.fctncalling.checker.multi_turn.multi_turn_checker import (
-    multi_turn_checker,
-    multi_turn_irrelevance_checker,
-)
+from fctncalling_rft.envs.fctncalling.checker.executable.executable_checker import executable_checker_rest, executable_checker_non_rest
+from fctncalling_rft.envs.fctncalling.checker.multi_turn.multi_turn_checker import multi_turn_checker, multi_turn_irrelevance_checker
 from fctncalling_rft.envs.fctncalling.checker.multi_turn.multi_turn_utils import *
 from fctncalling_rft.envs.fctncalling.checker.executable.custom_exception import BadAPIStatusError, NoAPIKeyError
 
@@ -33,8 +25,10 @@ class FctnCallingEnv:
         self.max_steps = 5
         with open(dataset_path, "r") as f:
             self.dataset = json.load(f)
-        self.func_doc_path = "/home/ljw/codes/MadeAgents/fctncalling_rft/fctncalling_rft/envs/fctncalling/multi_turn_func_doc/"
 
+        current_file_dir = Path(__file__).resolve().parent
+        self.func_doc_path = current_file_dir / "multi_turn_func_doc"
+        
         # A flag to indicate if the API has been tested.
         # We should always test the API with ground truth first before running the executable tests.
         # Sometimes the API may not be working as expected and we want to catch that before running the evaluation to ensure the results are accurate.
