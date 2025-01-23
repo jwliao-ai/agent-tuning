@@ -93,7 +93,7 @@ class FctnCallingRunner:
             if episode % self.log_interval == 0:
                 progress_bar.set_description(
                     f"Episode {episode}/{episodes}"
-                    f"(total step num: {total_num_steps} | average step reward: {np.mean(self.buffer.rewards[self.buffer.pre_batch_index]):.4f})",
+                    f"(total step num: {total_num_steps} | average step reward: {np.mean(self.buffer.rewards[self.buffer.pre_batch_index, :, :, -1]):.4f})",
                 )
                 self.log_train(train_infos, total_num_steps)
             progress_bar.update(1)

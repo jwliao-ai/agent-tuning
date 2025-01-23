@@ -60,7 +60,6 @@ def parse_args(args, parser):
     parser.add_argument("--vacab_size", type=int, default=32016)
     parser.add_argument("--gradient_cp_steps", type=int, default=1)
     parser.add_argument("--n_agents", type=int, default=1)
-    parser.add_argument("--log_interval", type=int, default=1)
 
     all_args = parser.parse_known_args(args)[0]
     all_args.model_name = Path(all_args.model_name_or_path).parts[-1]
