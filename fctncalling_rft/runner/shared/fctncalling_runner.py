@@ -70,12 +70,11 @@ class FctnCallingRunner:
                 # insert data into buffer
                 data = obs, rewards, dones, values, actions, action_tokens, log_probs
                 self.insert(data)
-                del data
 
                 for i in range(self.n_rollout_threads):
                     global_step = total_num_steps + step * self.n_rollout_threads + i
                     if dones[i, 0]:
-                        episodic_return = rewards[i, -1]
+                        episodic_return = infos[i]['episodic_return']
                         self.writter.add_scalar("episodic_return", episodic_return, global_step)
 
             torch.cuda.empty_cache()

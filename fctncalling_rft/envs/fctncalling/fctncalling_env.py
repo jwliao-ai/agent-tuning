@@ -22,12 +22,12 @@ class FctnCallingEnv:
         self.api_sanity_check = False
         self.dataset = []
         self.entry_idx = 0
-        self.max_steps = 5
+        self.max_steps = 4
         with open(dataset_path, "r") as f:
             self.dataset = json.load(f)
 
         current_file_dir = Path(__file__).resolve().parent
-        self.func_doc_path = current_file_dir / "multi_turn_func_doc"
+        self.func_doc_path = str(current_file_dir) + "/multi_turn_func_doc/"
         
         # A flag to indicate if the API has been tested.
         # We should always test the API with ground truth first before running the executable tests.
@@ -55,6 +55,7 @@ class FctnCallingEnv:
             self.reset()
 
         if is_multi_turn(self.category):
+            self.episodic_return = 0
             self.task_progress = 1
             self.steps_in_turn = 1
             self.func_calls_in_turns = [[] for _ in range(len(self.question))]
@@ -126,7 +127,7 @@ class FctnCallingEnv:
 
         next_obs, rewards, dones = self.transition_and_reward(results)
 
-        infos = [{"history": self.history, "traj_length": self.task_progress} for _ in range(self.n_agents)]
+        infos = {"history": self.history, "traj_length": self.task_progress, "episodic_return": self.episodic_return}
         return next_obs, rewards, dones, infos
 
     def render(self, **kwargs):
@@ -419,6 +420,7 @@ class FctnCallingEnv:
                     else:
                         obs = self.question[self.task_progress - 1][0]["content"]
                 rewards = [0 if idx != self.n_agents - 1 else 1 for idx in range(self.n_agents)]
+                self.episodic_return += 1
                 self.history["message"].extend([{"role": "user", "content": obs}])
                 self.steps_in_turn = 1 # reset steps for next turn
             else:
@@ -433,6 +435,7 @@ class FctnCallingEnv:
                     dones = np.ones((self.n_agents), dtype=bool)
                     obs = result["error"][0]
                     rewards = [0 if idx != self.n_agents - 1 else -1 for idx in range(self.n_agents)]
+                    self.episodic_return -= 1
                     self.steps_in_turn = 1
 
         obs = self.handler.format_prompt(self.history['message'], self.history['function'])
