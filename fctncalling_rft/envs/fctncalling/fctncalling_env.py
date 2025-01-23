@@ -29,6 +29,7 @@ class FctnCallingEnv:
         self.handler = HammerHandler(model_name=model_name)
         self.api_sanity_check = False
         self.dataset = []
+        self.entry_idx = 0
         self.max_steps = 5
         with open(dataset_path, "r") as f:
             self.dataset = json.load(f)
@@ -46,19 +47,12 @@ class FctnCallingEnv:
         #     f.write("")
 
     def reset(self):
-        # Convert self.dataset to an iterator if it isn't already
-        if not hasattr(self, "_dataset_iter"):
-            self._dataset_iter = iter(self.dataset)
-    
-        # Fetch the next entry from the iterator
-        try:
-            self.entry: dict = next(self._dataset_iter)
-        except StopIteration:
-            # If the iterator is exhausted, reset it and start over
-            self._dataset_iter = iter(self.dataset)
-            self.entry: dict = next(self._dataset_iter)
+        self.entry: dict = random.choice(self.dataset)
         self.id: str = self.entry["id"]
         self.category = self.id.rsplit("_", 1)[0]
+        self.id = self.category + "_" + str(self.entry_idx)
+        self.entry["id"] = self.id
+        self.entry_idx += 1
         self.question: list[list[dict]] = self.entry["question"]
         if not is_relevance_or_irrelevance(self.category):
             self.ground_truth = self.entry["ground_truth"]  # list[dict] for single-turn or list[list[str]] for multi-turn)
