@@ -32,7 +32,7 @@ class LanguageBuffer(object):
         self.obs = np.empty((self.max_batch, self.episode_length + 1, self.n_rollout_threads, self.num_agents), dtype=np.object_)
         self.actions = np.empty((self.max_batch, self.episode_length, self.n_rollout_threads, self.num_agents),dtype=np.object_)
         self.action_tokens = np.empty((self.max_batch,self.episode_length, self.n_rollout_threads, self.num_agents, self.max_new_tokens), dtype=np.int64)
-        self.rewards = np.zeros((self.max_batch,self.episode_length, self.n_rollout_threads, self.num_agents), dtype=np.float32)
+        self.rewards = np.zeros((self.max_batch, self.episode_length, self.n_rollout_threads, self.num_agents), dtype=np.float32)
         self.masks = np.ones((self.max_batch, self.episode_length + 1, self.n_rollout_threads, self.num_agents), dtype=np.float32)
 
         # for action-level ppo
@@ -118,22 +118,32 @@ class LanguageBuffer(object):
                     for token in reversed(range(last_token + 1)):
                         rew = self.rewards[self.cur_batch_index, step, thread, agent]
                         v = self.tppo_values[self.cur_batch_index, step, thread, agent, token]
-                        if token == last_token:
-                            if agent == self.num_agents - 1:
+                        if agent == self.num_agents - 1:
+                            if token == last_token:
                                 v_next = self.tppo_values[self.cur_batch_index, step + 1, thread, 0, 0]
                                 mask_next = self.masks[self.cur_batch_index, step + 1, thread, 0]
+                                delta = rew + self.gamma * v_next * mask_next - v
+                                gae = delta + self.gamma * self.gae_lambda * mask_next * gae
                             else:
+                                v_next = self.tppo_values[self.cur_batch_index, step, thread, agent, token + 1]
+                                if self.algo == "POAD":
+                                    delta = v_next - v
+                                else:
+                                    delta = self.gamma * v_next - v
+                                gae = delta + self.gamma * self.gae_lambda * gae
+                        else:
+                            if token == last_token:
                                 v_next = self.tppo_values[self.cur_batch_index, step, thread, agent + 1, 0]
                                 mask_next = self.masks[self.cur_batch_index, step, thread, agent + 1]
-                            delta = rew + self.gamma * v_next * mask_next - v
-                            gae = delta + self.gamma * self.gae_lambda * mask_next * gae
-                        else:
-                            v_next = self.tppo_values[self.cur_batch_index, step, thread, agent, token + 1]
-                            if self.algo == "POAD":
-                                delta = v_next - v
+                                delta = rew + self.gamma * v_next * mask_next - v
+                                gae = delta + self.gamma * self.gae_lambda * mask_next * gae
                             else:
-                                delta = self.gamma * v_next - v
-                            gae = delta + self.gamma * self.gae_lambda * gae
+                                v_next = self.tppo_values[self.cur_batch_index, step, thread, agent, token + 1]
+                                if self.algo == "POAD":
+                                    delta = v_next - v
+                                else:
+                                    delta = self.gamma * v_next - v
+                                gae = delta + self.gamma * self.gae_lambda * gae
                         self.tppo_returns[self.cur_batch_index, step, thread, agent, token] = gae + v
                         self.tppo_advantages[self.cur_batch_index, step, thread, agent, token] = gae
         self.cur_num_batch = self.cur_num_batch + 1 if self.cur_num_batch < self.max_batch else self.max_batch
