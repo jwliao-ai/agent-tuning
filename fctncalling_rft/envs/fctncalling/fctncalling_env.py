@@ -29,7 +29,7 @@ class FctnCallingEnv:
         self.handler = HammerHandler(model_name=model_name)
         self.api_sanity_check = False
         self.dataset = []
-        self.max_steps = 4
+        self.max_steps = 5
         with open(dataset_path, "r") as f:
             self.dataset = json.load(f)
         self.func_doc_path = "/home/ljw/codes/MadeAgents/fctncalling_rft/fctncalling_rft/envs/fctncalling/multi_turn_func_doc/"
@@ -46,7 +46,17 @@ class FctnCallingEnv:
         #     f.write("")
 
     def reset(self):
-        self.entry: dict = random.choice(self.dataset)
+        # Convert self.dataset to an iterator if it isn't already
+        if not hasattr(self, "_dataset_iter"):
+            self._dataset_iter = iter(self.dataset)
+    
+        # Fetch the next entry from the iterator
+        try:
+            self.entry: dict = next(self._dataset_iter)
+        except StopIteration:
+            # If the iterator is exhausted, reset it and start over
+            self._dataset_iter = iter(self.dataset)
+            self.entry: dict = next(self._dataset_iter)
         self.id: str = self.entry["id"]
         self.category = self.id.rsplit("_", 1)[0]
         self.question: list[list[dict]] = self.entry["question"]
@@ -266,17 +276,6 @@ class FctnCallingEnv:
             self.func_calls_in_turns[self.task_progress - 1].append(action_list_decoded)
             if is_empty_execute_response(action_list_decoded) and not is_empty_execute_response(self.ground_truth[self.task_progress - 1]):
                 self.history['message'].extend([{"role": "system", "content": f"Some more functions should be called to solve the user's query."}])
-                return {
-                    "id": self.id,
-                    "model_name": self.model_name,
-                    "test_category": self.category,
-                    "valid": False,
-                    "error": ["Assistant response is decoded as empty because of not following the format instructions."],
-                    "error_type": "multi_turn_decoder:empty_response",
-                    "prompt": self.entry,
-                    "action_raw": str(action),
-                    "decoded_action": str(action_list_decoded),
-                }
         except Exception as e:
             decode_error = str(e)
             self.history["message"].extend([{"role": "system", "content": "Assistant's response cannot be decoded: " + decode_error}])
@@ -298,6 +297,7 @@ class FctnCallingEnv:
             self.category, 
             self.model_name
             )
+        if not multi_turn_result["valid"]: print(f"error: {multi_turn_result['error']}")
 
         if contain_multi_turn_irrelevance(self.category):
             irrelevance_result = multi_turn_irrelevance_checker(action_list_decoded, tmp_ground_truth, self.task_progress)
@@ -449,8 +449,12 @@ class FctnCallingEnv:
 
         obs = self.handler.format_prompt(self.history['message'], self.history['function'])
         next_obs = np.array([obs for _ in range(self.n_agents)], dtype=np.object_)
-        # if dones == np.ones((self.n_agents), dtype=bool):
+        # if (dones == np.ones((self.n_agents), dtype=bool)).any():
+        #     # print("$" * 50)
+        #     # pprint.pp(self.history['message'])
         #     print("$" * 50)
-        #     pprint.pp(self.history['message'])
-        #     print("$" * 50)
+        #     print(f"functions in steps: {self.func_calls_in_turns[:self.task_progress]}")
+        #     print(f"ground truth in steps: {self.ground_truth[:self.task_progress]}")
+        #     print(f"error type: {result['error_type']}")
+        #     print(f"error: {result['error']}")
         return next_obs, rewards, dones

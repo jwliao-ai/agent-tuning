@@ -5,6 +5,7 @@ from fctncalling_rft.envs.fctncalling.checker.multi_turn.multi_turn_utils import
 )
 
 
+
 def multi_turn_checker(
     multi_turn_model_result_list_decoded: list[list[list[str]]],
     multi_turn_ground_truth_list: list[list[str]],
@@ -75,7 +76,7 @@ def multi_turn_checker(
             if not single_turn_model_response_list or is_empty_execute_response(single_turn_model_response_list):
                 return {
                     "valid": False,
-                    "error_message": f"Model response list is empty for turn {turn_index}",
+                    "error": f"Model response list is empty for turn {turn_index}",
                     "error_type": "multi_turn:empty_turn_model_response",
                     "execution_results": execution_results,
                     "latest_step_execution_result": single_step_model_execution_results,
@@ -140,7 +141,7 @@ def multi_turn_irrelevance_checker(
             else:
                 return {
                     "valid": False,
-                    "error_message": f"Assistant outputs valid function calls when it should not.",
+                    "error": f"Assistant outputs valid function calls when it should not.",
                     "error_type": "multi_turn:irrelevance_error:decoder_success",
                     "details": {"model response decoded": single_turn_model_response_list},
                 }
@@ -157,13 +158,29 @@ def state_checker(model_instances: dict, ground_truth_instances: dict):
     """
     for class_name, ground_truth_instance in ground_truth_instances.items():
         model_instance = model_instances[class_name]
-        valid, differeces = _compare_instances(model_instance, ground_truth_instance)
+        valid, differences = _compare_instances(model_instance, ground_truth_instance)
 
         if not valid:
+            model_instance_attributes = {
+                key: value
+                for key, value in vars(model_instance).items()
+                if not key.startswith("_")
+            }
+            ground_truth_instance_attributes = {
+                key: value
+                for key, value in vars(ground_truth_instance).items()
+                if not key.startswith("_")
+            }
+            # Format the error message for better readability
             return {
                 "valid": False,
-                "error": [f"Mismatch between the assistant response and the user question."],
+                "error": f"Model instance for {class_name} does not match the state with ground truth instance.",
                 "error_type": "multi_turn:instance_state_mismatch",
+                "details": {
+                    "differences": differences,
+                    "model_instance_state": model_instance_attributes,
+                    "ground_truth_instance_state": ground_truth_instance_attributes,
+                },
             }
 
     return {"valid": True}
@@ -174,12 +191,18 @@ def response_checker(model_response_list: list, ground_truth_response_list: list
     Checks if the model_response is a subsequence of the ground_truth_response.
     Each list contains the response of the function calls executed in that single turn.
     """
-    is_subsequence, missing_items = _is_subsequence(ground_truth_response_list, model_response_list)
+    # We don't need to enforce the order of the responses, because many entries have parallel operations, and so the model can execute them in any order.
+    is_subsequence, missing_items = _is_subsequence_unordered(ground_truth_response_list, model_response_list)
     if not is_subsequence:
         return {
             "valid": False,
-            "error": [f"Mismatch between assistant response execution results and the execution results the user wants. Missing items: {missing_items}."],
+            "error": f"Model response execution results so far does not contain all the ground truth response execution results for turn {turn_index}.",
             "error_type": "multi_turn:execution_response_mismatch",
+            "details": {
+                "missing_items": missing_items,
+                "model_response (including all previous turns)": model_response_list,
+                "ground_truth_response (only the current turn)": ground_truth_response_list,
+            },
         }
 
     return {"valid": True}
@@ -224,7 +247,7 @@ def _compare_instances(model_obect, ground_truth_object):
     assert type(model_obect) == type(
         ground_truth_object
     ), "Objects are not of the same type."
-    differeces = {}
+    differences = {}
     valid = True
     for attr_name in vars(ground_truth_object):
         # We don't check for private attributes
@@ -235,12 +258,12 @@ def _compare_instances(model_obect, ground_truth_object):
 
         if model_attr != ground_truth_attr:
             valid = False
-            differeces[attr_name] = (f"Model: {model_attr}, Ground Truth: {ground_truth_attr}")
+            differences[attr_name] = {"model": model_attr, "ground_truth": ground_truth_attr}
 
-    return valid, differeces
+    return valid, differences
 
 
-def _is_subsequence(list1, list2):
+def _is_subsequence(list1, list2) -> tuple[bool, list]:
     """
     Checks if list1 is a subsequence of list2, i.e., all elements of list1 are present in list2 in the same order.
     Also returns the elements of list1 that are not present in list2.
@@ -248,3 +271,26 @@ def _is_subsequence(list1, list2):
     # Convert list2 to an iterator to ensure that the elements are consumed only once.
     iter_list2 = iter(list2)
     return all(item in iter_list2 for item in list1), [item for item in list1 if item not in list2]
+
+
+def _is_subsequence_unordered(list1, list2) -> tuple[bool, list]:
+    """
+    Checks if all elements of list1 are present in list2, regardless of order.
+    Also returns the elements of list1 that are not present in list2.
+    """
+    # Copy list2 to avoid modifying the original list during checks
+    list2_copy = list2[:]
+    
+    # Check each item in list1 to see if it exists in list2_copy
+    missing_elements = []
+    for item in list1:
+        try:
+            # Attempt to remove one occurrence of `item` from list2_copy to handle duplicates
+            list2_copy.remove(item)
+        except ValueError:
+            # If item is not found, add it to missing_elements
+            missing_elements.append(item)
+    
+    # If there are missing elements, list1 is not a subsequence of list2
+    is_subsequence = len(missing_elements) == 0
+    return is_subsequence, missing_elements
