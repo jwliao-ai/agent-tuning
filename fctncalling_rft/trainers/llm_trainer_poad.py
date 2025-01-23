@@ -8,7 +8,7 @@ from torch.distributions.categorical import Categorical
 from fctncalling_rft.agents.actor import Actor
 
 
-class TPPOTrainer(ABC):
+class POADTrainer(ABC):
 
     def __init__(self, args, agent: Actor, num_agents):
         self.agent = agent

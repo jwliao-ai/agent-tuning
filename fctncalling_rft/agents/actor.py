@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import torch
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
@@ -18,12 +18,42 @@ from fctncalling_rft.models.critic import APPOCritic, TPPOCritic
 
 class Actor:
 
-    def __init__(self, model_name, max_new_tokens, algo, num_agents, load_path=None):
+    def __init__(
+            self, 
+            model_name, 
+            max_new_tokens, 
+            num_agents, 
+            algo, 
+            load_path=None,
+            load_in_4bit=True,
+            bf16=True,
+            device_map=None,
+        ):
         self.device = "cuda:0"
         self.algo = algo
         self.num_agents = num_agents
-        self.base_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map=self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, padding_side="left")
+        if load_in_4bit:
+            assert bf16, "we only support bnb_4bit_compute_dtype = bf16"
+            nf4_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+        else:
+            nf4_config = None
+        self.base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16 if bf16 else 'auto',
+            quantization_config=nf4_config, 
+            device_map=device_map
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, 
+            use_fast=False, 
+            padding_side="left"
+        )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
@@ -167,7 +197,7 @@ class Actor:
 
         return all_actions, all_action_tokens
 
-    def get_action_values(self, obs: np.ndarray, max_tokens: int = 4096) -> torch.Tensor:
+    def get_action_values(self, obs: np.ndarray, max_tokens: int = 2048) -> torch.Tensor:
         """
         Args:
             obs: np.ndarray of shape (rollout_threads, num_agents)
@@ -202,8 +232,43 @@ class Actor:
                 else:
                     start_idx = end_idx + 1
                     end_idx = start_idx + act_real_lengths[thread_idx, agent_idx]
-                sliced_logits[thread_idx, agent_idx, : act_real_lengths[thread_idx, agent_idx]] = logits[thread_idx, start_idx:end_idx]
+                sliced_logits[thread_idx, agent_idx, : act_real_lengths[thread_idx, agent_idx]] = logits[thread_idx, start_idx:end_idx].clone()
         return sliced_logits
+
+    # def get_slice(self, logits: torch.Tensor, obs_full_lengths: int, act_real_lengths: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Optimized version using vectorized computation of start indices and batch processing.
+    #     """
+    #     rollout_threads, num_agents = act_real_lengths.shape
+    #     data_dim = logits.shape[-1]
+        
+    #     # Precompute start indices using shifted cumulative sums
+    #     shifted_cum_act = torch.cat([
+    #         torch.zeros((rollout_threads, 1), device=act_real_lengths.device),
+    #         torch.cumsum(act_real_lengths[:, :-1], dim=1)
+    #     ], dim=1)
+    #     start_indices = (obs_full_lengths - 1) + shifted_cum_act
+        
+    #     # Initialize sliced_logits with the required dimensions
+    #     sliced_logits = torch.zeros(rollout_threads, num_agents, self.max_new_tokens, data_dim, device=logits.device)
+        
+    #     # Vectorized computation for each agent
+    #     for agent_idx in range(num_agents):
+    #         starts = start_indices[:, agent_idx]
+    #         lengths = act_real_lengths[:, agent_idx]
+    #         max_length = self.max_new_tokens
+            
+    #         # Generate indices for each thread
+    #         indices = (starts.unsqueeze(1) + torch.arange(max_length, device=logits.device)).clamp(max=logits.shape[1]-1)
+            
+    #         # Gather the slices for all threads at once
+    #         gathered = logits[torch.arange(rollout_threads)[:, None, None], indices[:, :, None], torch.arange(data_dim)[None, None, :]]
+            
+    #         # Mask out elements beyond the actual lengths
+    #         mask = (torch.arange(max_length, device=logits.device) < lengths.unsqueeze(1)).unsqueeze(-1)
+    #         sliced_logits[:, agent_idx] = gathered * mask
+        
+    #     return sliced_logits
 
     def get_token_values(self, obs: np.ndarray, action_tokens: torch.Tensor, train: bool = False, max_tokens: int = 4096) -> torch.Tensor:
         """
@@ -246,7 +311,7 @@ class Actor:
         token_values = self.get_slice(token_values, obs_full_lengths, act_real_lengths)
         return token_values
 
-    def get_token_logits(self, obs: np.ndarray, action_tokens: torch.Tensor, batch_infer: bool = False, max_tokens: int = 4096) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_token_logits(self, obs: np.ndarray, action_tokens: torch.Tensor, batch_infer: bool = False, max_tokens: int = 2048) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             obs: np.ndarray of shape (rollout_threads/batch_size, num_agents)
