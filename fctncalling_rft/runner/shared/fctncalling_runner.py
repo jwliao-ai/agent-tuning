@@ -5,7 +5,7 @@ import torch
 from tensorboardX import SummaryWriter
 from fctncalling_rft.agents import Actor
 from fctncalling_rft.utils import LanguageBuffer
-from fctncalling_rft.trainers import APPOTrainer, TPPOTrainer
+from fctncalling_rft.trainers import APPOTrainer, TPPOTrainer, POADTrainer
 
 class FctnCallingRunner:
     """Runner class to perform training, evaluation. and data collection. See parent class for details."""
@@ -34,13 +34,23 @@ class FctnCallingRunner:
         self.envs = config["envs"]
         self.eval_envs = config["eval_envs"]
 
-        self.agent = Actor(self.all_args.model_name_or_path, self.all_args.max_new_tokens, self.num_agents, self.algo)
+        self.agent = Actor(
+            model_name=self.all_args.model_name_or_path, 
+            context_window=self.all_args.context_window,
+            max_new_tokens=self.all_args.max_new_tokens, 
+            num_agents=self.num_agents,
+            profile_path=self.all_args.profile_path,
+            algo=self.algo
+        )
+        
         self.buffer = LanguageBuffer(self.all_args, self.num_agents, self.agent.tokenizer.pad_token_id)
 
         if self.algo == "APPO":
             self.trainer = APPOTrainer(self.all_args, self.agent, self.num_agents)
         elif self.algo == "TPPO":
             self.trainer = TPPOTrainer(self.all_args, self.agent, self.num_agents)
+        elif self.algo == "POAD":
+            self.trainer = POADTrainer(self.all_args, self.agent, self.num_agents)
         else:
             raise NotImplementedError
         
@@ -59,8 +69,6 @@ class FctnCallingRunner:
             for step in range(self.episode_length):
                 torch.cuda.empty_cache()
                 actions, action_tokens, values, log_probs = self.agent.infer_for_rollout(self.buffer.obs[self.buffer.cur_batch_index, step])
-
-                # here suppose each agent gets the same reward
                 obs, rewards, dones, infos = self.envs.step(actions)
 
                 # tokenized_obs = self.agent.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True)
@@ -111,6 +119,8 @@ class FctnCallingRunner:
             self.buffer.insert_appo(obs, actions, values, rewards, masks, action_tokens, log_probs)
         elif self.algo == "TPPO":
             self.buffer.insert_tppo(obs, actions, values, rewards, masks, action_tokens, log_probs)
+        elif self.algo == "POAD":
+            self.buffer.insert_poad(obs, actions, values, rewards, masks, action_tokens, log_probs)
         else:
             raise NotImplementedError
 
@@ -123,6 +133,8 @@ class FctnCallingRunner:
             self.buffer.batch_process_appo(values)
         elif self.algo == "TPPO":
             self.buffer.batch_process_tppo(values)
+        elif self.algo == "POAD":
+            self.buffer.batch_process_poad(values)
         else:
             raise NotImplementedError
 
