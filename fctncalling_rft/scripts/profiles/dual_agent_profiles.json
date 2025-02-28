@@ -1,0 +1,10 @@
+[
+    {
+        "role": "reasoner",
+        "prompt": "Let's think about this for a moment."
+    },
+    {
+        "role": "executor",
+        "prompt": "The output MUST strictly adhere to the following JSON format, and NO other text MUST be included.\nThe example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please directly output an empty list '[]'\n```\n[\n{'name': 'func_name1', 'arguments': {'argument1': 'value1', 'argument2': 'value2'}},\n... (more tool calls as required)\n]\n```\n"
+    }
+]

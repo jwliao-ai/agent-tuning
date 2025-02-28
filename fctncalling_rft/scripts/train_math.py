@@ -10,39 +10,38 @@ import yaml
 
 sys.path.append("../../")
 from fctncalling_rft.config import get_config
-from fctncalling_rft.envs.fctncalling.fctncalling_env import FctnCallingEnv
+from fctncalling_rft.envs.math.math_env import MathEnv
 from fctncalling_rft.envs.env_wrappers import ShareSubprocVecEnv, ShareDummyVecEnv
-from fctncalling_rft.runner.shared.fctncalling_runner import FctnCallingRunner as Runner
+from fctncalling_rft.runner.shared.math_runner import MathRunner as Runner
 
 
 def make_train_env(all_args):
-
     def get_env_fn(rank):
         def init_env():
-            env = FctnCallingEnv(
+            env = MathEnv(
                 rank=rank,
                 model_name=all_args.base_model,
                 num_agents=all_args.n_agents,
+                profile_path=all_args.profile_path,
                 dataset_path=all_args.dataset_path,
+                mode="train",
             )
             env.seed(all_args.seed + rank * 1000)
             return env
-
         return init_env
-
-    return ShareDummyVecEnv(
-        [get_env_fn(i) for i in range(all_args.n_rollout_threads)]
-    )
+    return ShareDummyVecEnv([get_env_fn(i) for i in range(all_args.n_rollout_threads)])
 
 
 def make_eval_env(all_args):
     def get_env_fn(rank):
         def init_env():
-            env = FctnCallingEnv(
-                rank=rank, 
-                model_name=all_args.base_model, 
-                num_agents=all_args.n_agents, 
-                dataset_path=all_args.dataset_path
+            env = MathEnv(
+                rank=rank,
+                model_name=all_args.base_model,
+                num_agents=all_args.n_agents,
+                profile_path=all_args.profile_path,
+                dataset_path=all_args.dataset_path,
+                mode="test",
             )
             env.seed(all_args.seed + rank * 5000)
             return env
@@ -58,7 +57,6 @@ def parse_args(args, parser):
     parser.add_argument("--model_type", type=str, required=False, help="the model architecture")
     parser.add_argument("--model_name_or_path", type=str, required=True, help="Which model to use")
     parser.add_argument("--max_new_tokens", type=int, default=256, help="max_new_tokens")
-    parser.add_argument("--vacab_size", type=int, default=32016)
     parser.add_argument("--n_agents", type=int, default=1)
     parser.add_argument("--profile_path", type=str, default="agent_profiles.json", required=True)
     all_args = parser.parse_known_args(args)[0]
