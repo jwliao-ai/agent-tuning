@@ -13,21 +13,28 @@ from peft import (
     set_peft_model_state_dict,
 )
 import os
+import json
 from fctncalling_rft.models.critic import APPOCritic, TPPOCritic
 
+def load_profiles(path):
+    with open(path, 'r') as file:
+        profiles = json.load(file)
+    return profiles
 
 class Actor:
 
     def __init__(
             self, 
-            model_name, 
-            max_new_tokens, 
-            num_agents, 
-            algo, 
-            load_path=None,
-            load_in_4bit=True,
-            bf16=True,
-            device_map=None,
+            model_name: str | os.PathLike, 
+            context_window: int, 
+            max_new_tokens: int, 
+            num_agents: int, 
+            profile_path: str | os.PathLike,
+            algo: str, 
+            load_path: str = None,
+            load_in_4bit: bool = False,
+            bf16: bool = True,
+            device_map = None,
         ):
         self.device = "cuda:0"
         self.algo = algo
@@ -58,15 +65,9 @@ class Actor:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
             self.base_model.config.pad_token_id = self.tokenizer.pad_token_id
+        self.context_window = context_window
         self.max_new_tokens = max_new_tokens
-        if num_agents == 1:
-            self.roles = [""]
-        if num_agents == 2:
-            self.roles = [
-                "Let's think step by step. ",
-                "\nDirectly call tools (strictly follow the format): \n",
-            ]
-
+        self.profiles = load_profiles(profile_path)
 
         if load_path is None:
             self.actor = self._init_actor().to(self.device)
@@ -76,75 +77,43 @@ class Actor:
 
     def _init_actor(self, lora_weights=None):
         self.base_model.enable_input_require_grads()
+        model = None
         if lora_weights is None:
-            config = LoraConfig(
-                r=8,
-                lora_alpha=16,
-                target_modules=[
-                    "q_proj",
-                    "v_proj",
-                ],
-                lora_dropout=0,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-            model = get_peft_model(self.base_model, config)
+            # Initialize all adapters from scratch
+            for i in range(self.num_agents):
+                config = LoraConfig(
+                    r=8,
+                    lora_alpha=16,
+                    target_modules=["q_proj", "v_proj"],
+                    lora_dropout=0,
+                    bias="none",
+                    task_type="CAUSAL_LM"
+                )
+                if model is None:
+                    model = get_peft_model(self.base_model, config, adapter_name=self.profiles[i]["role"])
+                else:
+                    model.add_adapter(adapter_name=self.profiles[i]["role"], peft_config=config)
             model.print_trainable_parameters()
         else:
-            model = PeftModel.from_pretrained(
-                self.base_model,
-                lora_weights,
-                torch_dtype=torch.float16,
-            )
+            # Load pretrained adapters into the PeftModel
+            if len(lora_weights) != self.num_agents:
+                raise ValueError(f"Number of pretrained weights ({len(lora_weights)}) must match num_agent ({num_agents})")
+            pass  # Further implementation required
+        # Apply half-precision across all adapters
         model.half()
+        print(f"Initialized model with {self.num_agents} adapters.")
         return model
 
     def _init_critic(self, critic_weights=None):
         if self.algo == "APPO":
             critic = APPOCritic(self.base_model, self.tokenizer)
-        elif self.algo == "TPPO":
+        elif self.algo == "TPPO" or self.algo == "POAD":
             critic = TPPOCritic(self.base_model, self.tokenizer)
         else:
             raise NotImplementedError
         if critic_weights is not None:
             critic.v_head.load_state_dict(torch.load(critic_weights, map_location="cpu"))
         return critic
-
-    @torch.no_grad()
-    def get_actions(self, obs, device=None):
-        """
-        Compute actions and value function predictions for the given inputs.
-        """
-        device = self.device if device is None else device
-        prompts = obs.tolist()
-        token_seq = self.tokenizer(prompts, return_tensors="pt", padding=True)
-        input_ids = token_seq["input_ids"].to(self.device)
-        attn_mask = token_seq["attention_mask"].to(self.device)
-
-        output = self.actor.generate(
-            input_ids,
-            attention_mask=attn_mask,
-            do_sample=True,
-            top_k=50,
-            temperature=0.5,
-            max_new_tokens=self.max_new_tokens,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
-            return_dict_in_generate=True,
-        )
-        sequences = output.sequences
-
-        actions = []
-        action_tokens = (
-            torch.ones((sequences.shape[0], self.max_new_tokens), dtype=torch.int64, device=self.device,) * self.tokenizer.pad_token_id)
-        for i in range(sequences.shape[0]):
-            action_token = sequences[i][input_ids[i].shape[0] :]
-            action_tokens[i, : action_token.shape[0]] = action_token
-            action = self.tokenizer.decode(action_token, skip_special_tokens=True)
-            actions.append(action)
-        actions = np.array(actions, dtype=np.object_)
-
-        return actions, action_tokens
 
     @torch.no_grad()
     def get_actions_sequential(self, obs: np.ndarray):
@@ -161,16 +130,16 @@ class Actor:
         """
         # Note: for online, batch_size = 1, so the first dimension goes away
         rollout_threads, num_agents = obs.shape
-
         all_actions = np.empty((rollout_threads, num_agents), dtype=object)
         all_action_tokens = torch.ones((rollout_threads, num_agents, self.max_new_tokens), dtype=torch.int64, device=self.device,) * self.tokenizer.pad_token_id
 
         prompts = obs[:, 0].tolist()
         for agent_idx in range(num_agents):
-            prompts = [prompt + self.roles[agent_idx] for prompt in prompts]
+            prompts = [self.profiles[agent_idx]["prompt"] + prompt + self.profiles[agent_idx]["role"] + ": " for prompt in prompts]
             token_seq = self.tokenizer(prompts, return_tensors="pt", padding=True)
             input_ids = token_seq["input_ids"].cuda()
             attn_mask = token_seq["attention_mask"].cuda()
+            self.actor.set_adapter(self.profiles[agent_idx]["role"])
             output = self.actor.generate(
                 input_ids,
                 attention_mask=attn_mask,
@@ -197,7 +166,7 @@ class Actor:
 
         return all_actions, all_action_tokens
 
-    def get_action_values(self, obs: np.ndarray, max_tokens: int = 2048) -> torch.Tensor:
+    def get_action_values(self, obs: np.ndarray) -> torch.Tensor:
         """
         Args:
             obs: np.ndarray of shape (rollout_threads, num_agents)
@@ -205,7 +174,7 @@ class Actor:
         Returns:
             action_values: torch.Tensor of shape (rollout_threads, num_agents, 1)
         """
-        inputs = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, truncation=True, max_length=max_tokens)
+        inputs = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, truncation=True, max_length=self.context_window)
         input_ids = inputs["input_ids"].cuda()
         attention_mask = inputs["attention_mask"].cuda()
 
@@ -216,7 +185,7 @@ class Actor:
     def get_slice(self, logits: torch.Tensor, obs_full_lengths: int, act_real_lengths: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            logits: torch.Tensor of shape (rollout_threads, num_agents, max_new_tokens, data_dim)
+            logits: torch.Tensor of shape (rollout_threads, obs_len + concatenated_action_len, data_dim)
             obs_full_lengths: int
             act_real_lengths: torch.Tensor of shape (rollout_threads, num_agents)
 
@@ -235,42 +204,7 @@ class Actor:
                 sliced_logits[thread_idx, agent_idx, : act_real_lengths[thread_idx, agent_idx]] = logits[thread_idx, start_idx:end_idx].clone()
         return sliced_logits
 
-    # def get_slice(self, logits: torch.Tensor, obs_full_lengths: int, act_real_lengths: torch.Tensor) -> torch.Tensor:
-    #     """
-    #     Optimized version using vectorized computation of start indices and batch processing.
-    #     """
-    #     rollout_threads, num_agents = act_real_lengths.shape
-    #     data_dim = logits.shape[-1]
-        
-    #     # Precompute start indices using shifted cumulative sums
-    #     shifted_cum_act = torch.cat([
-    #         torch.zeros((rollout_threads, 1), device=act_real_lengths.device),
-    #         torch.cumsum(act_real_lengths[:, :-1], dim=1)
-    #     ], dim=1)
-    #     start_indices = (obs_full_lengths - 1) + shifted_cum_act
-        
-    #     # Initialize sliced_logits with the required dimensions
-    #     sliced_logits = torch.zeros(rollout_threads, num_agents, self.max_new_tokens, data_dim, device=logits.device)
-        
-    #     # Vectorized computation for each agent
-    #     for agent_idx in range(num_agents):
-    #         starts = start_indices[:, agent_idx]
-    #         lengths = act_real_lengths[:, agent_idx]
-    #         max_length = self.max_new_tokens
-            
-    #         # Generate indices for each thread
-    #         indices = (starts.unsqueeze(1) + torch.arange(max_length, device=logits.device)).clamp(max=logits.shape[1]-1)
-            
-    #         # Gather the slices for all threads at once
-    #         gathered = logits[torch.arange(rollout_threads)[:, None, None], indices[:, :, None], torch.arange(data_dim)[None, None, :]]
-            
-    #         # Mask out elements beyond the actual lengths
-    #         mask = (torch.arange(max_length, device=logits.device) < lengths.unsqueeze(1)).unsqueeze(-1)
-    #         sliced_logits[:, agent_idx] = gathered * mask
-        
-    #     return sliced_logits
-
-    def get_token_values(self, obs: np.ndarray, action_tokens: torch.Tensor, train: bool = False, max_tokens: int = 4096) -> torch.Tensor:
+    def get_token_values(self, obs: np.ndarray, action_tokens: torch.Tensor, train: bool = False) -> torch.Tensor:
         """
         Args:
             obs: np.ndarray of shape (rollout_threads/batch_size, num_agents)
@@ -279,7 +213,7 @@ class Actor:
         Returns:
             token_values: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, data_dim)
         """
-        obs_token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, max_length=max_tokens, truncation=True)
+        obs_token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, max_length=self.context_window, truncation=True)
         # shape (rollout_threads, obs_token_len)
         obs_input_ids = obs_token_seq["input_ids"].cuda()
         obs_attn_mask = obs_token_seq["attention_mask"].cuda()
@@ -311,7 +245,12 @@ class Actor:
         token_values = self.get_slice(token_values, obs_full_lengths, act_real_lengths)
         return token_values
 
-    def get_token_logits(self, obs: np.ndarray, action_tokens: torch.Tensor, batch_infer: bool = False, max_tokens: int = 2048) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_token_logits(
+            self, 
+            obs: np.ndarray, 
+            action_tokens: torch.Tensor, 
+            batch_infer: bool = False
+        ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             obs: np.ndarray of shape (rollout_threads/batch_size, num_agents)
@@ -321,7 +260,7 @@ class Actor:
             pi_logits: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
             rho_logits: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
         """
-        obs_token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, max_length=max_tokens, truncation=True)
+        obs_token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, max_length=self.context_window, truncation=True)
         # shape (rollout_threads, obs_token_len)
         obs_input_ids = obs_token_seq["input_ids"].cuda()
         obs_attn_mask = obs_token_seq["attention_mask"].cuda()
@@ -345,16 +284,21 @@ class Actor:
         obs_act_mask = torch.cat([obs_attn_mask, padded_action_attn_mask], dim=1)
         # shape (rollout_threads, obs_token_len + max_concatenated_length)
 
-        if batch_infer:
+        if batch_infer: # currently no use
             with self.actor.disable_adapter():
                 rho_logits = self.batch_infer(self.actor, obs_act_ids, obs_act_mask, obs_full_lengths, act_real_lengths)
             pi_logits = self.batch_infer(self.actor, obs_act_ids, obs_act_mask, obs_full_lengths, act_real_lengths)
         else:
+            pi_logits = []
             with self.actor.disable_adapter():
                 rho_outputs = self.actor(input_ids=obs_act_ids, attention_mask=obs_act_mask)
                 rho_logits = self.get_slice(rho_outputs.logits, obs_full_lengths, act_real_lengths)
-            pi_outputs = self.actor(input_ids=obs_act_ids, attention_mask=obs_act_mask)
-            pi_logits = self.get_slice(pi_outputs.logits, obs_full_lengths, act_real_lengths)
+            for agent_idx in range(self.num_agents):
+                self.actor.set_adapter(self.profiles[agent_idx]["role"])
+                pi_agent_i_outputs = self.actor(input_ids=obs_act_ids, attention_mask=obs_act_mask)
+                pi_agent_i_logits = self.get_slice(pi_agent_i_outputs.logits, obs_full_lengths, act_real_lengths)[:, agent_idx]
+                pi_logits.append(pi_agent_i_logits)
+            pi_logits = torch.stack(pi_logits, dim=1)
         return pi_logits, rho_logits
 
     @torch.no_grad()
@@ -413,7 +357,6 @@ class Actor:
 
     @torch.no_grad()
     def infer_for_rollout(self, obs):
-        # actions, action_tokens = self.get_actions(obs)
         rollout_actions, rollout_action_tokens = self.get_actions_sequential(obs)
         if self.algo == "APPO":
             rollout_values = self.get_action_values(obs)
@@ -421,9 +364,9 @@ class Actor:
             action_log_probs, _ = self.get_joint_action_log_probs(obs, rollout_action_tokens, batch_infer=False)
             rollout_action_tokens = rollout_action_tokens.int().cpu().numpy()
             rollout_log_probs = action_log_probs.float().cpu().numpy()
-        elif self.algo == "TPPO":
+        elif self.algo == "TPPO" or self.algo == "POAD":
             rollout_values = self.get_token_values(obs, rollout_action_tokens).squeeze(-1)
-            logits, _ = self.get_token_logits(obs, rollout_action_tokens, batch_infer=True)
+            logits, _ = self.get_token_logits(obs, rollout_action_tokens)
             logp_softmax = torch.log_softmax(logits, dim=-1)
             token_log_probs = torch.gather(logp_softmax, -1, rollout_action_tokens.unsqueeze(-1)).squeeze(-1)
             rollout_values = rollout_values.float().cpu().numpy()
@@ -448,8 +391,7 @@ class Actor:
 
         # values
         with self.actor.disable_adapter():
-            values = self.critic(input_ids, attention_mask=attn_mask)
-            values = values[:, -1]
+            values = self.critic(input_ids, attention_mask=attn_mask)[:, -1]
         return values
 
     def get_next_tppo_values_single(self, obs):
@@ -459,8 +401,7 @@ class Actor:
 
         # values
         with self.actor.disable_adapter():
-            values = self.critic(input_ids, attention_mask=attn_mask)
-            values = values[:, -1]
+            values = self.critic(input_ids, attention_mask=attn_mask)[:, -1]
         return values
 
     def get_next_values(self, obs: np.ndarray) -> np.ndarray:
@@ -475,7 +416,7 @@ class Actor:
         if self.algo == "APPO":
             next_action_values = self.get_action_values(obs)
             next_values = next_action_values.cpu().float().numpy()
-        elif self.algo == "TPPO":
+        elif self.algo == "TPPO" or self.algo == "POAD":
             next_token_values = self.get_next_tppo_values(obs)
             next_values = next_token_values.cpu().float().numpy()
         else:
