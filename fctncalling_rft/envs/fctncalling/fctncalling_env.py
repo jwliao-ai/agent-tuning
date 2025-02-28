@@ -130,10 +130,6 @@ class FctnCallingEnv:
         infos = {"history": self.history, "traj_length": self.task_progress, "episodic_return": self.episodic_return}
         return next_obs, rewards, dones, infos
 
-    def render(self, **kwargs):
-        # self.env.render(**kwargs)
-        pass
-
     def close(self):
         pass
 
@@ -141,7 +137,6 @@ class FctnCallingEnv:
         np.random.seed(seed)
 
     def get_env_info(self):
-
         env_info = {"n_agents": self.n_agents}
         return env_info
 
