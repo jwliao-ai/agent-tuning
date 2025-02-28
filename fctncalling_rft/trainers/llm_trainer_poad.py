@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from fctncalling_rft.utils.util import get_gard_norm, huber_loss, mse_loss, to_cuda
 from torch.distributions.categorical import Categorical
 from fctncalling_rft.agents.actor import Actor
+from fctncalling_rft.utils.language_buffer import LanguageBuffer
 
 
 class POADTrainer(ABC):
@@ -154,7 +155,7 @@ class POADTrainer(ABC):
 
         return value_loss, critic_grad_norm, policy_loss, policy_grad_norm, total_entropy
 
-    def train(self, buffer):
+    def train(self, buffer: LanguageBuffer):
         """
         Perform a training update using minibatch GD.
         :param buffer: (SharedReplayBuffer) buffer containing training data.
@@ -171,7 +172,7 @@ class POADTrainer(ABC):
 
         update_time = 0
         for _ in range(self.ppo_epoch):
-            data_generator = buffer.tppo_sampler(self.num_mini_batch)
+            data_generator = buffer.poad_sampler(self.num_mini_batch)
             for sample in data_generator:
                 value_loss, value_grad_norm, policy_loss, policy_grad_norm, entropy = (
                     self.ppo_update(sample)

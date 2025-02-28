@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from fctncalling_rft.utils.util import get_gard_norm, huber_loss, mse_loss, to_cuda
 from torch.distributions.categorical import Categorical
 from fctncalling_rft.agents.actor import Actor
+from fctncalling_rft.utils.language_buffer import LanguageBuffer
 
 
 class TPPOTrainer(ABC):
@@ -125,7 +126,7 @@ class TPPOTrainer(ABC):
         total_entropy = 0
         policy_loss = 0
         for start in range(0, batch_size, cp_batch_size):
-            end = start + cp_batch_size 
+            end = start + cp_batch_size
             if end > batch_size:
                 end = batch_size
             cp_weight = (end - start) / batch_size
@@ -154,7 +155,7 @@ class TPPOTrainer(ABC):
 
         return value_loss, critic_grad_norm, policy_loss, policy_grad_norm, total_entropy
 
-    def train(self, buffer):
+    def train(self, buffer: LanguageBuffer):
         """
         Perform a training update using minibatch GD.
         :param buffer: (SharedReplayBuffer) buffer containing training data.
