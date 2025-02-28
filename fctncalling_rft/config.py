@@ -157,15 +157,16 @@ def get_config():
 
     # prepare parameters
     parser.add_argument("--algorithm_name", type=str, default="APPO", choices=["TPPO", "APPO", "POAD"])
+    parser.add_argument("--use_A2PO", action="store_true", default=False, help="by default False, use A2PO. If set, use A2PO.")
     parser.add_argument("--experiment_name", type=str, default="check", help="an identifier to distinguish different experiment.",)
-    parser.add_argument("--seed", type=int, default=1, help="Random seed for numpy/torch")
-    parser.add_argument("--cuda", action="store_false", default=True, help="by default True, will use GPU to train; or else will use CPU;")
+    parser.add_argument("--seed", type=int, default=1, help="Random seed for numpy/torch.")
+    parser.add_argument("--cuda", action="store_false", default=True, help="by default True, will use GPU to train; or else will use CPU.")
     parser.add_argument("--cuda_deterministic", action="store_false", default=True, help="by default, make sure random seed effective. if set, bypass such function.")
-    parser.add_argument("--n_training_threads", type=int, default=16, help="Number of torch threads for training")
-    parser.add_argument("--n_rollout_threads", type=int, default=32, help="Number of parallel envs for training rollouts")
-    parser.add_argument("--n_eval_rollout_threads", type=int, default=1, help="Number of parallel envs for evaluating rollouts")
-    parser.add_argument("--n_render_rollout_threads", type=int, default=1, help="Number of parallel envs for rendering rollouts")
-    parser.add_argument("--num_env_steps", type=int, default=10e6, help="Number of environment steps to train (default: 10e6)")
+    parser.add_argument("--n_training_threads", type=int, default=16, help="Number of torch threads for training.")
+    parser.add_argument("--n_rollout_threads", type=int, default=32, help="Number of parallel envs for training rollouts.")
+    parser.add_argument("--n_eval_rollout_threads", type=int, default=1, help="Number of parallel envs for evaluating rollouts.")
+    parser.add_argument("--n_render_rollout_threads", type=int, default=1, help="Number of parallel envs for rendering rollouts.")
+    parser.add_argument("--num_env_steps", type=int, default=10e6, help="Number of environment steps to train (default: 10e6).")
     
     # wandb setup
     parser.add_argument( "--user_name", type=str, default="xxx", help="[for wandb usage], to specify user's name for simply collecting training data.")
@@ -174,6 +175,10 @@ def get_config():
     # env parameters
     # parser.add_argument("--env_name", type=str, default='StarCraft2', help="specify the name of environment")
     parser.add_argument("--use_obs_instead_of_state", action="store_true", default=False, help="Whether to use global state or concatenated obs")
+
+    # actor parameters
+    parser.add_argument("--context_window", type=int, default=2048, help="the context window of the actor when acting")
+
 
     # replay buffer parameters
     parser.add_argument("--episode_length", type=int, default=200, help="Max length for any episode")
@@ -205,7 +210,7 @@ def get_config():
     parser.add_argument("--weight_decay", type=float, default=0)
 
     # ppo parameters
-    parser.add_argument("--num_accumulation_steps", type=int, default=1, help="number of gradient accumulation steps (default: 1)")
+    parser.add_argument("--gradient_cp_steps", type=int, default=1, help="number of gradient accumulation steps (default: 1)")
     parser.add_argument("--ppo_epoch", type=int, default=5, help="number of ppo epochs (default: 5)")
     parser.add_argument("--use_clipped_value_loss", action="store_false", default=True, help="by default, clip loss value. If set, do not clip loss value.")
     parser.add_argument("--clip_param", type=float, default=0.2, help="ppo clip parameter (default: 0.2)")
@@ -215,7 +220,7 @@ def get_config():
     parser.add_argument("--use_max_grad_norm", action="store_false", default=True, help="by default, use max norm of gradients. If set, do not use.")
     parser.add_argument("--max_grad_norm", type=float, default=0.5, help="max norm of gradients (default: 0.5)")
     parser.add_argument("--use_gae", action="store_false", default=True, help="use generalized advantage estimation")
-    parser.add_argument("--gamma", type=float, default=0.95, help="discount factor for rewards (default: 0.99)")
+    parser.add_argument("--gamma", type=float, default=0.99, help="discount factor for rewards (default: 0.99)")
     parser.add_argument("--gae_lambda", type=float, default=0.95, help="gae lambda parameter (default: 0.95)")
     parser.add_argument("--use_proper_time_limits", action="store_true", default=False, help="compute returns taking into account time limits")
     parser.add_argument("--use_huber_loss", action="store_false", default=True, help="by default, use huber loss. If set, do not use huber loss.")
@@ -225,6 +230,7 @@ def get_config():
 
     # run parameters
     parser.add_argument("--use_linear_lr_decay", action="store_true", default=False, help="use a linear schedule on the learning rate")
+    
     # save parameters
     parser.add_argument("--save_interval", type=int, default=100, help="time duration between contiunous twice models saving.")
 
@@ -235,8 +241,5 @@ def get_config():
     parser.add_argument("--use_eval", action="store_true", default=False, help="by default, do not start evaluation. If set`, start evaluation alongside with training.")
     parser.add_argument("--eval_interval", type=int, default=5, help="time duration between contiunous twice evaluation progress.")
     parser.add_argument("--eval_episodes", type=int, default=10, help="number of episodes of a single evaluation.")
-
-    # pretrained parameters
-    parser.add_argument("--model_dir", type=str, default=None, help="by default None. set the path to pretrained model.")
 
     return parser
