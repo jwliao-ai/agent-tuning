@@ -1,10 +1,10 @@
+import pprint
 import numpy as np
 from abc import ABC
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from fctncalling_rft.utils.util import get_gard_norm, huber_loss, mse_loss, to_cuda
 from torch.distributions.categorical import Categorical
+from fctncalling_rft.utils.util import get_gard_norm, huber_loss, mse_loss, to_cuda
 from fctncalling_rft.agents.actor import Actor
 from fctncalling_rft.utils.language_buffer import LanguageBuffer
 
@@ -13,6 +13,8 @@ class TPPOTrainer(ABC):
 
     def __init__(self, args, agent: Actor, num_agents):
         self.agent = agent
+        self.num_agent = agent.num_agents
+        self.agent_iteration_interval = args.agent_iteration_interval
         self.clip_param = args.clip_param
         self.ppo_epoch = args.ppo_epoch
         self.num_mini_batch = args.num_mini_batch
@@ -69,8 +71,8 @@ class TPPOTrainer(ABC):
 
         return value_loss * self.value_loss_coef
 
-    def ppo_update(self, sample):
-        observations, actions, log_probs, value_preds, \
+    def ppo_update(self, sample, global_steps: int):
+        observations, actions, rollout_observations, log_probs, value_preds, \
             returns, advantages, action_tokens = sample
             
         advantages_copy = advantages.copy()
@@ -79,11 +81,11 @@ class TPPOTrainer(ABC):
         std_advantages = np.nanstd(advantages_copy)
         advantages = (advantages - mean_advantages) / (std_advantages + 1e-8)
 
-        observations, actions, log_probs, value_preds, returns, advantages, action_tokens = \
-            to_cuda((observations, actions, log_probs, value_preds, returns, advantages, action_tokens))
+        actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens = \
+            to_cuda((actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens))
         token_mask = self.cal_token_mask(action_tokens)
 
-        batch_size = observations.shape[0]
+        batch_size = rollout_observations.shape[0]
         cp_batch_size = int(batch_size // self.gradient_cp_steps)
         if cp_batch_size == 0:
             print(f"gradient_cp_steps > batch_size, set cp_batch_size = 1")
@@ -101,7 +103,15 @@ class TPPOTrainer(ABC):
                 end = batch_size
             cp_weight = (end - start) / batch_size  # Weight for the chunk loss
             cp_obs_batch, cp_action_tokens_batch, cp_value_preds_batch, cp_returns_batch, cp_token_mask = \
-                observations[start:end], action_tokens[start:end], value_preds[start:end], returns[start:end], token_mask[start:end]
+                rollout_observations[start:end], action_tokens[start:end], value_preds[start:end], returns[start:end], token_mask[start:end]
+            if self.agent_iteration_interval > 0:
+                time_slice = global_steps // self.agent_iteration_interval
+                agent_to_train = time_slice % self.num_agent
+                cp_obs_batch = cp_obs_batch[:, agent_to_train: agent_to_train + 1]
+                cp_action_tokens_batch = cp_action_tokens_batch[:, agent_to_train: agent_to_train + 1]
+                cp_value_preds_batch = cp_value_preds_batch[:, agent_to_train: agent_to_train + 1]
+                cp_returns_batch = cp_returns_batch[:, agent_to_train: agent_to_train + 1]
+                cp_token_mask = cp_token_mask[:, agent_to_train: agent_to_train + 1]
             values_infer = self.agent.get_token_values(cp_obs_batch, cp_action_tokens_batch, train=True).squeeze(-1) # .squeeze(-1)?
             # print(f"[trainer] values_infer shape: {values_infer.shape}")
             # print(f"[trainer] cp_value_preds_batch shape: {cp_value_preds_batch.shape}")
@@ -131,11 +141,19 @@ class TPPOTrainer(ABC):
                 end = batch_size
             cp_weight = (end - start) / batch_size
             cp_obs_batch, cp_action_tokens_batch, cp_adv_batch, cp_log_prob_batch, cp_token_mask = \
-                observations[start:end], action_tokens[start:end], advantages[start:end], log_probs[start:end], token_mask[start:end]
+                rollout_observations[start:end], action_tokens[start:end], advantages[start:end], log_probs[start:end], token_mask[start:end]
             logits_infer, _ = self.agent.get_token_logits(cp_obs_batch, cp_action_tokens_batch) # (cp_batch_size, num_agents, vocab_size)
             pi_log_prob = torch.log_softmax(logits_infer, dim=-1)
             log_prob_infer = torch.gather(pi_log_prob, -1, cp_action_tokens_batch.unsqueeze(-1)).squeeze(-1)
             entropy = Categorical(logits=logits_infer).entropy()
+            if self.agent_iteration_interval > 0:
+                time_slice = global_steps // self.agent_iteration_interval
+                agent_to_train = time_slice % self.num_agent
+                log_prob_infer = log_prob_infer[:, agent_to_train: agent_to_train + 1]
+                cp_log_prob_batch = cp_log_prob_batch[:, agent_to_train: agent_to_train + 1]
+                cp_adv_batch = cp_adv_batch[:, agent_to_train: agent_to_train + 1]
+                entropy = entropy[:, agent_to_train: agent_to_train + 1]
+                cp_token_mask = cp_token_mask[:, agent_to_train: agent_to_train + 1]
             # print(f"[trainer] log_prob_infer shape: {log_prob_infer.shape}")
             # print(f"[trainer] cp_log_prob_batch shape: {cp_log_prob_batch.shape}")
             # print(f"[trainer] cp_adv_batch shape: {cp_adv_batch.shape}")
@@ -145,7 +163,6 @@ class TPPOTrainer(ABC):
             cp_policy_loss *= cp_weight
             cp_policy_loss.backward()
             policy_loss += cp_policy_loss.item()
-            del cp_obs_batch, cp_action_tokens_batch, cp_adv_batch, cp_log_prob_batch, cp_token_mask
             torch.cuda.empty_cache()
         if total_approx_kl > 0.02:
             return value_loss, critic_grad_norm, 0, 0, 0
@@ -155,7 +172,7 @@ class TPPOTrainer(ABC):
 
         return value_loss, critic_grad_norm, policy_loss, policy_grad_norm, total_entropy
 
-    def train(self, buffer: LanguageBuffer):
+    def train(self, buffer: LanguageBuffer, global_steps: int):
         """
         Perform a training update using minibatch GD.
         :param buffer: (SharedReplayBuffer) buffer containing training data.
@@ -175,7 +192,7 @@ class TPPOTrainer(ABC):
             data_generator = buffer.tppo_sampler(self.num_mini_batch)
             for sample in data_generator:
                 value_loss, value_grad_norm, policy_loss, policy_grad_norm, entropy = (
-                    self.ppo_update(sample)
+                    self.ppo_update(sample, global_steps)
                 )
                 train_info["value_loss"] += value_loss
                 train_info["value_grad_norm"] += value_grad_norm
