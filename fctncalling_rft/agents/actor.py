@@ -14,6 +14,7 @@ from peft import (
 )
 import os
 import json
+import pprint
 from fctncalling_rft.models.critic import APPOCritic, TPPOCritic
 
 def load_profiles(path):
@@ -130,13 +131,15 @@ class Actor:
         """
         # Note: for online, batch_size = 1, so the first dimension goes away
         rollout_threads, num_agents = obs.shape
+        all_obs = np.empty((rollout_threads, num_agents), dtype=object)
         all_actions = np.empty((rollout_threads, num_agents), dtype=object)
         all_action_tokens = torch.ones((rollout_threads, num_agents, self.max_new_tokens), dtype=torch.int64, device=self.device,) * self.tokenizer.pad_token_id
 
         prompts = obs[:, 0].tolist()
         for agent_idx in range(num_agents):
-            prompts = [self.profiles[agent_idx]["prompt"] + prompt + self.profiles[agent_idx]["role"] + ": " for prompt in prompts]
-            token_seq = self.tokenizer(prompts, return_tensors="pt", padding=True)
+            prompts = [prompt + self.profiles[agent_idx]["role"] + ": " for prompt in prompts]
+            prompts_with_profile = [self.profiles[agent_idx]["prompt"] + prompt for prompt in prompts]
+            token_seq = self.tokenizer(prompts_with_profile, return_tensors="pt", padding=True)
             input_ids = token_seq["input_ids"].cuda()
             attn_mask = token_seq["attention_mask"].cuda()
             self.actor.set_adapter(self.profiles[agent_idx]["role"])
@@ -155,16 +158,17 @@ class Actor:
             actions = []
             for i in range(rollout_threads):
                 action_token = sequences[i][input_ids[i].shape[0] :]
-                all_action_tokens[i, agent_idx, : action_token.shape[0]] = action_token
+                all_action_tokens[i, agent_idx, : action_token.shape[0]] = action_token.clone()
                 action = self.tokenizer.decode(action_token, skip_special_tokens=True)
-                prompts[i] = prompts[i] + action
+                prompts[i] = prompts[i] + action + "\n"
                 actions.append(action)
             actions = np.array(actions, dtype=np.object_)
+            all_obs[:, agent_idx] = np.array(prompts_with_profile, dtype=np.object_)
             all_actions[:, agent_idx] = actions
             # print(f"agent {agent_idx} actions: {actions}")
             # print(f"-" * 20)
 
-        return all_actions, all_action_tokens
+        return all_obs, all_actions, all_action_tokens
 
     def get_action_values(self, obs: np.ndarray) -> torch.Tensor:
         """
@@ -184,13 +188,13 @@ class Actor:
 
     def get_slice(self, logits: torch.Tensor, obs_full_lengths: int, act_real_lengths: torch.Tensor) -> torch.Tensor:
         """
-        Args:
-            logits: torch.Tensor of shape (rollout_threads, obs_len + concatenated_action_len, data_dim)
-            obs_full_lengths: int
-            act_real_lengths: torch.Tensor of shape (rollout_threads, num_agents)
+        Args
+            :logits: torch.Tensor of shape (rollout_threads, obs_len + concatenated_action_len, data_dim)
+            :obs_full_lengths: int
+            :act_real_lengths: torch.Tensor of shape (rollout_threads, num_agents)
 
-        Returns:
-            sliced_logits: torch.Tensor of shape (rollout_threads, num_agents, max_new_tokens, data_dim)
+        Returns
+            :sliced_logits: torch.Tensor of shape (rollout_threads, num_agents, max_new_tokens, data_dim)
         """
         sliced_logits = torch.zeros(act_real_lengths.shape[0], act_real_lengths.shape[1], self.max_new_tokens, logits.shape[-1]).to(logits.device)
         for thread_idx in range(act_real_lengths.shape[0]):
@@ -213,37 +217,27 @@ class Actor:
         Returns:
             token_values: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, data_dim)
         """
-        obs_token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, max_length=self.context_window, truncation=True)
-        # shape (rollout_threads, obs_token_len)
-        obs_input_ids = obs_token_seq["input_ids"].cuda()
-        obs_attn_mask = obs_token_seq["attention_mask"].cuda()
-        obs_full_lengths = obs_input_ids.shape[1]
+        rollout_threads, num_agents = obs.shape
+        all_values = []
 
-        act_attn_mask = action_tokens != 0
-        # shape (rollout_threads, num_agents, max_new_tokens)
-        act_real_lengths = act_attn_mask.sum(dim=-1)
-        # shape (rollout_threads, num_agents)
+        for agent_idx in range(num_agents):
+            token_seq = self.tokenizer(obs[:, agent_idx].tolist(), return_tensors="pt", padding=True, max_length=self.context_window, truncation=True)
+            obs_input_ids = token_seq["input_ids"].cuda()
+            obs_attn_mask = token_seq["attention_mask"].cuda()
+            obs_full_lengths = obs_input_ids.shape[1]
 
-        # concatedenated_action_tokens: a list of torch.Tensor
-        concatenated_action_tokens = [tokens[tokens != 0]for tokens in action_tokens.view(action_tokens.size(0), -1)]
-        # padded_action_tokens: shape (rollout_threads, max_concatenated_length)
-        padded_action_tokens = pad_sequence(concatenated_action_tokens, batch_first=True, padding_value=0)
-        # padded_action_attn_mask: shape (rollout_threads, max_concatenated_length)
-        padded_action_attn_mask = (padded_action_tokens != 0).long()
+            act_attn_mask = (action_tokens[:, agent_idx] != self.tokenizer.pad_token_id)
+            act_real_lengths = act_attn_mask.sum(dim=-1, keepdim=True)
 
-        obs_act_ids = torch.cat([obs_input_ids, padded_action_tokens], dim=1)
-        obs_act_mask = torch.cat([obs_attn_mask, padded_action_attn_mask], dim=1)
-        # shape (rollout_threads, obs_token_len + max_concatenated_length)
+            obs_act_ids = torch.cat([obs_input_ids, action_tokens[:, agent_idx]], dim=-1)
+            obs_act_mask = torch.cat([obs_attn_mask, act_attn_mask], dim=-1)
 
-        with self.actor.disable_adapter():
-            if not train:
-                with torch.no_grad():
-                    token_values = self.critic(obs_act_ids, attention_mask=obs_act_mask)
-            else:
-                token_values = self.critic(obs_act_ids, attention_mask=obs_act_mask)
-            # values has shape (rollout_threads, obs_token_len + max_concatenated_length, 1)
-        token_values = self.get_slice(token_values, obs_full_lengths, act_real_lengths)
-        return token_values
+            with self.actor.disable_adapter():
+                values = self.critic(obs_act_ids, attention_mask=obs_act_mask)
+            token_values = self.get_slice(values, obs_full_lengths, act_real_lengths)
+            all_values.append(token_values)
+        all_values = torch.cat(all_values, dim=1) # stack on agent dimension
+        return all_values
 
     def get_token_logits(
             self, 
@@ -252,53 +246,40 @@ class Actor:
             batch_infer: bool = False
         ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Args:
-            obs: np.ndarray of shape (rollout_threads/batch_size, num_agents)
-            action_tokens: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens)
+        Args
+            :obs: np.ndarray of shape (rollout_threads/batch_size, num_agents)
+            :action_tokens: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens)
 
-        Returns:
-            pi_logits: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
-            rho_logits: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
+        Returns
+            :pi_logits: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
+            :rho_logits: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
         """
-        obs_token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, max_length=self.context_window, truncation=True)
-        # shape (rollout_threads, obs_token_len)
-        obs_input_ids = obs_token_seq["input_ids"].cuda()
-        obs_attn_mask = obs_token_seq["attention_mask"].cuda()
-        obs_full_lengths = obs_input_ids.shape[1]
+        rollout_threads, num_agents = obs.shape
+        pi_logits, rho_logits = [], []
 
-        act_attn_mask = action_tokens != self.tokenizer.pad_token_id
-        # shape (rollout_threads, num_agents, max_new_tokens)
-        act_real_lengths = act_attn_mask.sum(dim=-1)
-        # shape (rollout_threads, num_agents)
+        for agent_idx in range(num_agents):
+            token_seq = self.tokenizer(obs[:, agent_idx].tolist(), return_tensors="pt", padding=True, max_length=self.context_window, truncation=True)
+            obs_input_ids = token_seq["input_ids"].cuda()
+            obs_attn_mask = token_seq["attention_mask"].cuda()
+            obs_full_lengths = obs_input_ids.shape[1]
 
-        # concatedenated_action_tokens: a list of torch.Tensor
-        concatenated_action_tokens = [tokens[tokens != self.tokenizer.pad_token_id] for tokens in action_tokens.view(action_tokens.size(0), -1)]
+            act_attn_mask = (action_tokens[:, agent_idx] != self.tokenizer.pad_token_id)
+            act_real_lengths = act_attn_mask.sum(dim=-1, keepdim=True)
 
-        # padded_action_tokens: shape (rollout_threads, max_concatenated_length)
-        padded_action_tokens = pad_sequence(concatenated_action_tokens, batch_first=True, padding_value=self.tokenizer.pad_token_id)
+            obs_act_ids = torch.cat([obs_input_ids, action_tokens[:, agent_idx]], dim=-1)
+            obs_act_mask = torch.cat([obs_attn_mask, act_attn_mask], dim=-1)
 
-        # padded_action_attn_mask: shape (rollout_threads, max_concatenated_length)
-        padded_action_attn_mask = (padded_action_tokens != 0).long()
-
-        obs_act_ids = torch.cat([obs_input_ids, padded_action_tokens], dim=1)
-        obs_act_mask = torch.cat([obs_attn_mask, padded_action_attn_mask], dim=1)
-        # shape (rollout_threads, obs_token_len + max_concatenated_length)
-
-        if batch_infer: # currently no use
-            with self.actor.disable_adapter():
-                rho_logits = self.batch_infer(self.actor, obs_act_ids, obs_act_mask, obs_full_lengths, act_real_lengths)
-            pi_logits = self.batch_infer(self.actor, obs_act_ids, obs_act_mask, obs_full_lengths, act_real_lengths)
-        else:
-            pi_logits = []
-            with self.actor.disable_adapter():
-                rho_outputs = self.actor(input_ids=obs_act_ids, attention_mask=obs_act_mask)
-                rho_logits = self.get_slice(rho_outputs.logits, obs_full_lengths, act_real_lengths)
-            for agent_idx in range(self.num_agents):
+            if batch_infer:
+                pass
+            else:
+                with self.actor.disable_adapter():
+                    rho_outputs = self.actor(input_ids=obs_act_ids, attention_mask=obs_act_mask)
+                    rho_logits.append(self.get_slice(rho_outputs.logits, obs_full_lengths, act_real_lengths))
                 self.actor.set_adapter(self.profiles[agent_idx]["role"])
-                pi_agent_i_outputs = self.actor(input_ids=obs_act_ids, attention_mask=obs_act_mask)
-                pi_agent_i_logits = self.get_slice(pi_agent_i_outputs.logits, obs_full_lengths, act_real_lengths)[:, agent_idx]
-                pi_logits.append(pi_agent_i_logits)
-            pi_logits = torch.stack(pi_logits, dim=1)
+                pi_outputs = self.actor(input_ids=obs_act_ids, attention_mask=obs_act_mask)
+                pi_logits.append(self.get_slice(pi_outputs.logits, obs_full_lengths, act_real_lengths))
+        rho_logits = torch.cat(rho_logits, dim=1)
+        pi_logits = torch.cat(pi_logits, dim=1)
         return pi_logits, rho_logits
 
     @torch.no_grad()
@@ -357,16 +338,16 @@ class Actor:
 
     @torch.no_grad()
     def infer_for_rollout(self, obs):
-        rollout_actions, rollout_action_tokens = self.get_actions_sequential(obs)
-        if self.algo == "APPO":
+        rollout_obs, rollout_actions, rollout_action_tokens = self.get_actions_sequential(obs)
+        if self.algo == "APPO": # TODO: need update for rollout_obs
             rollout_values = self.get_action_values(obs)
             rollout_values = rollout_values.float().cpu().numpy()
             action_log_probs, _ = self.get_joint_action_log_probs(obs, rollout_action_tokens, batch_infer=False)
             rollout_action_tokens = rollout_action_tokens.int().cpu().numpy()
             rollout_log_probs = action_log_probs.float().cpu().numpy()
         elif self.algo == "TPPO" or self.algo == "POAD":
-            rollout_values = self.get_token_values(obs, rollout_action_tokens).squeeze(-1)
-            logits, _ = self.get_token_logits(obs, rollout_action_tokens)
+            rollout_values = self.get_token_values(rollout_obs, rollout_action_tokens).squeeze(-1)
+            logits, _ = self.get_token_logits(rollout_obs, rollout_action_tokens)
             logp_softmax = torch.log_softmax(logits, dim=-1)
             token_log_probs = torch.gather(logp_softmax, -1, rollout_action_tokens.unsqueeze(-1)).squeeze(-1)
             rollout_values = rollout_values.float().cpu().numpy()
@@ -375,7 +356,7 @@ class Actor:
         else:
             raise NotImplementedError
 
-        return rollout_actions, rollout_action_tokens, rollout_values, rollout_log_probs
+        return rollout_obs, rollout_actions, rollout_action_tokens, rollout_values, rollout_log_probs
 
     def get_next_tppo_values(self, obs: np.ndarray):
         """

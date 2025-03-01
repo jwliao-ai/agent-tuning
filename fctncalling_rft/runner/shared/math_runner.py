@@ -55,8 +55,8 @@ class MathRunner:
 
 
     def run(self):
-        obs = self.envs.reset()
-        self.buffer.obs[self.buffer.cur_batch_index, 0] = obs.copy()
+        next_obs = self.envs.reset()
+        self.buffer.obs[self.buffer.cur_batch_index, 0] = next_obs.copy()
 
         episodes = int(self.num_env_steps) // self.episode_length // self.n_rollout_threads
 
@@ -66,15 +66,15 @@ class MathRunner:
             total_num_steps = (episode + 1) * self.episode_length * self.n_rollout_threads
             for step in range(self.episode_length):
                 torch.cuda.empty_cache()
-                actions, action_tokens, values, log_probs = self.agent.infer_for_rollout(self.buffer.obs[self.buffer.cur_batch_index, step])
-                obs, rewards, dones, infos = self.envs.step(actions)
+                rollout_obs, actions, action_tokens, values, log_probs = self.agent.infer_for_rollout(self.buffer.obs[self.buffer.cur_batch_index, step])
+                next_obs, rewards, dones, infos = self.envs.step(actions)
 
                 # tokenized_obs = self.agent.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True)
                 # num_tokens = tokenized_obs["input_ids"].shape[1]
                 # print(f"[run] num_tokens: {num_tokens}")
 
                 # insert data into buffer
-                data = obs, rewards, dones, values, actions, action_tokens, log_probs
+                data = next_obs, rollout_obs, rewards, dones, values, actions, action_tokens, log_probs
                 self.insert(data)
 
                 for i in range(self.n_rollout_threads):
@@ -85,7 +85,7 @@ class MathRunner:
 
             torch.cuda.empty_cache()
             self.before_update()
-            train_infos = self.trainer.train(self.buffer)
+            train_infos = self.trainer.train(self.buffer, total_num_steps)
             self.buffer.after_update()
             torch.cuda.empty_cache()
 
@@ -107,18 +107,18 @@ class MathRunner:
                 self.eval(total_num_steps)
 
     def insert(self, data):
-        obs, rewards, dones, values, actions, action_tokens, log_probs = data
+        next_obs, rollout_obs, rewards, dones, values, actions, action_tokens, log_probs = data
 
         dones_env = np.all(dones, axis=1)
         masks = np.ones((self.n_rollout_threads, self.num_agents), dtype=np.float32)
         masks[dones_env == True] = np.zeros(((dones_env == True).sum(), self.num_agents), dtype=np.float32)
 
         if self.algo == "APPO":
-            self.buffer.insert_appo(obs, actions, values, rewards, masks, action_tokens, log_probs)
+            self.buffer.insert_appo(next_obs, actions, values, rewards, masks, action_tokens, log_probs)
         elif self.algo == "TPPO":
-            self.buffer.insert_tppo(obs, actions, values, rewards, masks, action_tokens, log_probs)
+            self.buffer.insert_tppo(next_obs, actions, rollout_obs, values, rewards, masks, action_tokens, log_probs)
         elif self.algo == "POAD":
-            self.buffer.insert_poad(obs, actions, values, rewards, masks, action_tokens, log_probs)
+            self.buffer.insert_poad(next_obs, actions, values, rewards, masks, action_tokens, log_probs)
         else:
             raise NotImplementedError
 

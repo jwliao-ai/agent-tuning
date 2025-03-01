@@ -1,6 +1,7 @@
 import numpy as np
 import json
 import random
+import pprint
 from typing import Optional
 from .parse_utils_qwen import extract_answer as extract_fn, parse_ground_truth
 from .grader import math_equal
@@ -51,7 +52,7 @@ class MathEnv:
         self.label = problem_answer_pair["final_answer"]
         self.current_state = self.problem + "\n"
         self.history = []
-        obs = np.array([self.problem for _ in range(self.n_agents)], dtype=np.object_)
+        obs = np.array([self.current_state for _ in range(self.n_agents)], dtype=np.object_)
         self.step_count = 0
         return obs
     
@@ -59,7 +60,6 @@ class MathEnv:
         self.step_count += 1
         actions_to_check = []
         self.state_transition(actions)
-        next_obs = np.array([self.current_state for _ in range(self.n_agents)], dtype=np.object_)
 
         for i in range(self.n_agents):
             if self.profiles[i]["with_answer"]:
@@ -76,14 +76,20 @@ class MathEnv:
             dones = np.ones((self.n_agents), dtype=bool)
         else:
             dones = np.zeros((self.n_agents), dtype=bool)
-        
+            
+        if score == 0.0:
+            self.current_state = self.current_state + "judge: The answer is incorrect.\n"
+        else:
+            self.current_state = self.current_state + "judge: The answer is correct.\n"
+
+        next_obs = np.array([self.current_state for _ in range(self.n_agents)], dtype=np.object_)
         rewards = [0 if idx != self.n_agents - 1 else score for idx in range(self.n_agents)]
         infos = {"state": self.current_state, "episodic_return": score}
         return next_obs, rewards, dones, infos
 
     def state_transition(self, actions):
         for i, action in enumerate(actions):
-            self.current_state = self.current_state + "\n" + self.profiles[i]["role"] + ": " + action + "\n"
+            self.current_state = self.current_state + self.profiles[i]["role"] + ": " + action + "\n"
 
     def _is_correct(self, completion):
         extracted_answer = extract_answer(completion)
@@ -97,4 +103,4 @@ class MathEnv:
         return env_info
     
     def close(self):
-        pass
+        pass 
