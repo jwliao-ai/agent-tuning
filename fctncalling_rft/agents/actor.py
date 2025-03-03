@@ -98,7 +98,7 @@ class Actor:
         else:
             # Load pretrained adapters into the PeftModel
             if len(lora_weights) != self.num_agents:
-                raise ValueError(f"Number of pretrained weights ({len(lora_weights)}) must match num_agent ({num_agents})")
+                raise ValueError(f"Number of pretrained weights ({len(lora_weights)}) must match num_agent ({self.num_agents})")
             pass  # Further implementation required
         # Apply half-precision across all adapters
         model.half()
@@ -243,6 +243,7 @@ class Actor:
             self, 
             obs: np.ndarray, 
             action_tokens: torch.Tensor, 
+            agent_index: int = None,
             batch_infer: bool = False
         ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -258,6 +259,8 @@ class Actor:
         pi_logits, rho_logits = [], []
 
         for agent_idx in range(num_agents):
+            if agent_index is not None and agent_idx != agent_index:
+                continue
             token_seq = self.tokenizer(obs[:, agent_idx].tolist(), return_tensors="pt", padding=True, max_length=self.context_window, truncation=True)
             obs_input_ids = token_seq["input_ids"].cuda()
             obs_attn_mask = token_seq["attention_mask"].cuda()

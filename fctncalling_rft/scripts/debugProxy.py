@@ -2,7 +2,7 @@ import sys
 import runpy
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.system("echo $CUDA_VISIBLE_DEVICES")
 os.chdir('/home/ljw/codes/MadeAgents/fctncalling_rft/fctncalling_rft/scripts')
 # args = 'python -m lilab.multiview_scripts_new.s2_matpkl2ballpkl /mnt/liying.cibr.ac.cn_Data_Temp/multiview-large/TPH2KOxWT/2022-06-16ball.matpkl --time 1 9 17 23 27'
@@ -19,16 +19,16 @@ args = """python train_math.py \
         --ppo_epoch 1 \
         --lr 1e-8 \
         --critic_lr 5e-7 \
-        --dataset_path /home/ljw/codes/MadeAgents/fctncalling_rft/fctncalling_rft/envs/math/data/merged_precalculus_train.json \
+        --dataset_path ../envs/math/data/merged_precalculus_train.json \
         --model_name_or_path /ext0/hcchai/codemate/Qwen2.5-Coder-1.5B-Instruct/ \
         --n_agents 2 \
-        --agent_iteration_interval 8 \
+        --agent_iteration_interval 2000 \
         --profile_path profiles/math_dual.json \
         --n_rollout_threads 2 \
         --episode_length 3 \
         --gradient_cp_steps 4 \
         --context_window 2048 \
-        --max_new_tokens 256 \
+        --max_new_tokens 512 \
         --save_interval 1000"""
 
 args = args.split()

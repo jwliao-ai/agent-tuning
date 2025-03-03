@@ -30,7 +30,10 @@ class TPPOTrainer(ABC):
         self.opti_eps = args.opti_eps
         self.gradient_cp_steps = args.gradient_cp_steps
 
-        self.policy_optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.agent.actor.parameters()), lr=self.lr, eps=1e-5, weight_decay=0)
+        self.policy_optimizer = {}
+        for agent_idx in range(self.num_agent):
+            self.agent.actor.set_adapter(self.agent.profiles[agent_idx]["role"])
+            self.policy_optimizer[self.agent.profiles[agent_idx]["role"]] = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.agent.actor.parameters()), lr=self.lr, eps=1e-5, weight_decay=0)
         self.critic_optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.agent.critic.parameters()), lr=self.critic_lr, eps=1e-5)
 
 
@@ -72,6 +75,12 @@ class TPPOTrainer(ABC):
         return value_loss * self.value_loss_coef
 
     def ppo_update(self, sample, global_steps: int):
+
+        agent_to_train = None
+        if self.agent_iteration_interval > 0:
+            time_slice = global_steps // self.agent_iteration_interval
+            agent_to_train = time_slice % self.num_agent
+
         observations, actions, rollout_observations, log_probs, value_preds, \
             returns, advantages, action_tokens = sample
             
@@ -104,18 +113,7 @@ class TPPOTrainer(ABC):
             cp_weight = (end - start) / batch_size  # Weight for the chunk loss
             cp_obs_batch, cp_action_tokens_batch, cp_value_preds_batch, cp_returns_batch, cp_token_mask = \
                 rollout_observations[start:end], action_tokens[start:end], value_preds[start:end], returns[start:end], token_mask[start:end]
-            if self.agent_iteration_interval > 0:
-                time_slice = global_steps // self.agent_iteration_interval
-                agent_to_train = time_slice % self.num_agent
-                cp_obs_batch = cp_obs_batch[:, agent_to_train: agent_to_train + 1]
-                cp_action_tokens_batch = cp_action_tokens_batch[:, agent_to_train: agent_to_train + 1]
-                cp_value_preds_batch = cp_value_preds_batch[:, agent_to_train: agent_to_train + 1]
-                cp_returns_batch = cp_returns_batch[:, agent_to_train: agent_to_train + 1]
-                cp_token_mask = cp_token_mask[:, agent_to_train: agent_to_train + 1]
             values_infer = self.agent.get_token_values(cp_obs_batch, cp_action_tokens_batch, train=True).squeeze(-1) # .squeeze(-1)?
-            # print(f"[trainer] values_infer shape: {values_infer.shape}")
-            # print(f"[trainer] cp_value_preds_batch shape: {cp_value_preds_batch.shape}")
-            # print(f"[trainer] cp_returns_batch shape: {cp_returns_batch.shape}")
             cp_value_loss = self.cal_value_loss(values_infer, cp_value_preds_batch, cp_returns_batch, cp_token_mask)
             cp_value_loss *= cp_weight
             cp_value_loss.backward()
@@ -131,7 +129,7 @@ class TPPOTrainer(ABC):
 
         # policy update
         torch.cuda.empty_cache()
-        self.policy_optimizer.zero_grad()
+        for optimizer in self.policy_optimizer.values(): optimizer.zero_grad()
         total_approx_kl = 0
         total_entropy = 0
         policy_loss = 0
@@ -142,21 +140,15 @@ class TPPOTrainer(ABC):
             cp_weight = (end - start) / batch_size
             cp_obs_batch, cp_action_tokens_batch, cp_adv_batch, cp_log_prob_batch, cp_token_mask = \
                 rollout_observations[start:end], action_tokens[start:end], advantages[start:end], log_probs[start:end], token_mask[start:end]
-            logits_infer, _ = self.agent.get_token_logits(cp_obs_batch, cp_action_tokens_batch) # (cp_batch_size, num_agents, vocab_size)
+            logits_infer, _ = self.agent.get_token_logits(cp_obs_batch, cp_action_tokens_batch, agent_to_train) # (cp_batch_size, num_agents, vocab_size)
             pi_log_prob = torch.log_softmax(logits_infer, dim=-1)
-            log_prob_infer = torch.gather(pi_log_prob, -1, cp_action_tokens_batch.unsqueeze(-1)).squeeze(-1)
-            entropy = Categorical(logits=logits_infer).entropy()
-            if self.agent_iteration_interval > 0:
-                time_slice = global_steps // self.agent_iteration_interval
-                agent_to_train = time_slice % self.num_agent
-                log_prob_infer = log_prob_infer[:, agent_to_train: agent_to_train + 1]
+            if agent_to_train is not None:
+                cp_action_tokens_batch = cp_action_tokens_batch[:, agent_to_train: agent_to_train + 1]
                 cp_log_prob_batch = cp_log_prob_batch[:, agent_to_train: agent_to_train + 1]
                 cp_adv_batch = cp_adv_batch[:, agent_to_train: agent_to_train + 1]
-                entropy = entropy[:, agent_to_train: agent_to_train + 1]
                 cp_token_mask = cp_token_mask[:, agent_to_train: agent_to_train + 1]
-            # print(f"[trainer] log_prob_infer shape: {log_prob_infer.shape}")
-            # print(f"[trainer] cp_log_prob_batch shape: {cp_log_prob_batch.shape}")
-            # print(f"[trainer] cp_adv_batch shape: {cp_adv_batch.shape}")
+            log_prob_infer = torch.gather(pi_log_prob, -1, cp_action_tokens_batch.unsqueeze(-1)).squeeze(-1)
+            entropy = Categorical(logits=logits_infer).entropy()
             cp_policy_loss, approx_kl, cp_entropy = self.cal_policy_loss(log_prob_infer, cp_log_prob_batch, cp_adv_batch, entropy, cp_token_mask)
             total_approx_kl += approx_kl * cp_weight
             total_entropy += cp_entropy * cp_weight
@@ -166,8 +158,17 @@ class TPPOTrainer(ABC):
             torch.cuda.empty_cache()
         if total_approx_kl > 0.02:
             return value_loss, critic_grad_norm, 0, 0, 0
-        policy_grad_norm = nn.utils.clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
-        self.policy_optimizer.step()
+        
+        if agent_to_train is not None:
+            self.agent.actor.set_adapter(self.agent.profiles[agent_to_train]['role'])
+            policy_grad_norm = nn.utils.clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
+            self.policy_optimizer[self.agent.profiles[agent_to_train]['role']].step()
+        else:
+            for profile in self.agent.profiles:
+                self.agent.actor.set_adapter(profile['role'])
+                policy_grad_norm = nn.utils.clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
+                self.policy_optimizer[profile['role']].step()
+
         policy_grad_norm = policy_grad_norm.item()
 
         return value_loss, critic_grad_norm, policy_loss, policy_grad_norm, total_entropy
