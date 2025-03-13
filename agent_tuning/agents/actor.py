@@ -137,7 +137,7 @@ class Actor:
 
         prompts = obs[:, 0].tolist()
         for agent_idx in range(num_agents):
-            prompts = [prompt + self.profiles[agent_idx]["role"] + ": " for prompt in prompts]
+            prompts = [prompt + "<|im_start|>" + self.profiles[agent_idx]["role"] + ": " for prompt in prompts]
             prompts_with_profile = [self.profiles[agent_idx]["prompt"] + prompt for prompt in prompts]
             token_seq = self.tokenizer(prompts_with_profile, return_tensors="pt", padding=True)
             input_ids = token_seq["input_ids"].cuda()
@@ -311,7 +311,7 @@ class Actor:
         while action_tokens[pos] == self.tokenizer.pad_token_id: pos -= 1
         return pos
 
-    def get_joint_action_log_probs(self, obs: np.ndarray, action_tokens: torch.Tensor, batch_infer=False):
+    def get_joint_action_log_probs(self, obs: np.ndarray, action_tokens: torch.Tensor, agent_to_train: int = None, batch_infer: bool = False):
         """
         Args:
             obs: np.ndarray of shape (rollout_threads/batch_size, num_agents)
@@ -321,7 +321,7 @@ class Actor:
             action_log_probs: torch.Tensor of shape (rollout_threads/batch_size, num_agents)
             entropies: torch.Tensor of shape (rollout_threads/batch_size, num_agents)
         """
-        logits, _ = self.get_token_logits(obs, action_tokens, batch_infer=batch_infer)
+        logits, _ = self.get_token_logits(obs, action_tokens, agent_index=agent_to_train, batch_infer=batch_infer)
         # pi_logits: shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
         pi_log_softmax = torch.log_softmax(logits, dim=-1)
         log_probs = torch.empty(logits.shape[0], logits.shape[1]).to(logits.device)
@@ -334,7 +334,7 @@ class Actor:
                 token_log_probs = torch.gather(log_softmax_slice, -1, action_token_slice.unsqueeze(-1)).squeeze(-1)
                 action_log_prob = token_log_probs.sum()
                 log_probs[thread, agent] = action_log_prob
-                entropy = Categorical(logits=logits[thread, :act_token_length, :]).entropy().mean()
+                entropy = Categorical(logits=logits[thread, agent, :act_token_length, :]).entropy().mean()
                 entropies[thread, agent] = entropy
 
         return log_probs, entropies
@@ -345,7 +345,7 @@ class Actor:
         if self.algo == "APPO": # TODO: need update for rollout_obs
             rollout_values = self.get_action_values(obs)
             rollout_values = rollout_values.float().cpu().numpy()
-            action_log_probs, _ = self.get_joint_action_log_probs(obs, rollout_action_tokens, batch_infer=False)
+            action_log_probs, _ = self.get_joint_action_log_probs(rollout_obs, rollout_action_tokens, batch_infer=False)
             rollout_action_tokens = rollout_action_tokens.int().cpu().numpy()
             rollout_log_probs = action_log_probs.float().cpu().numpy()
         elif self.algo == "TPPO" or self.algo == "POAD":

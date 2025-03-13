@@ -11,6 +11,9 @@ class APPOTrainer(ABC):
 
     def __init__(self, args, agent: Actor, num_agents):
         self.agent = agent
+        self.num_agent = agent.num_agents
+        self.tokenizer = agent.tokenizer
+        self.agent_iteration_interval = args.agent_iteration_interval
         self.clip_param = args.clip_param
         self.ppo_epoch = args.ppo_epoch
         self.num_mini_batch = args.num_mini_batch
@@ -54,16 +57,23 @@ class APPOTrainer(ABC):
         value_loss = torch.max(value_loss_clipped, value_loss_unclipped).mean()
         return value_loss * self.value_loss_coef
 
-    def ppo_update(self, sample):
-        sample = to_cuda(sample)
-        observations, actions, log_probs, value_preds, returns, advantages, action_tokens = sample
-        batch_size = observations.shape[0]
+    def ppo_update(self, sample, global_steps: int):
+
+        agent_to_train = None
+        if self.agent_iteration_interval > 0:
+            time_slice = global_steps // self.agent_iteration_interval
+            agent_to_train = time_slice % self.num_agent
+
+        observations, actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens = sample
+        
+        actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens = \
+            to_cuda((actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens))
+        
+        batch_size = rollout_observations.shape[0]
         cp_batch_size = int(batch_size // self.gradient_cp_steps)
         if cp_batch_size == 0:
             print(f"gradient_cp_steps > batch_size, set cp_batch_size = 1")
             cp_batch_size = 1
-        # print(f"[trainer] batch_size: {batch_size}")
-        # print(f"[trainer] cp_batch_size: {cp_batch_size}")
 
         torch.cuda.empty_cache()
         # critic update with checkpoint gradient accumulation
@@ -77,9 +87,10 @@ class APPOTrainer(ABC):
             cp_obs_batch, cp_value_preds_batch, cp_returns_batch = observations[start:end], value_preds[start:end], returns[start:end]
             values_infer = self.agent.get_action_values(cp_obs_batch)
             cp_value_loss = self.cal_value_loss(values_infer, cp_value_preds_batch, cp_returns_batch)
-            cp_value_loss = cp_value_loss * cp_weight  # Scale the loss by the chunk weight
+            cp_value_loss *= cp_weight  # Scale the loss by the chunk weight
             cp_value_loss.backward()
             value_loss += cp_value_loss.item()
+            torch.cuda.empty_cache()
         # Gradient clipping
         if self._use_max_grad_norm:
             critic_grad_norm = nn.utils.clip_grad_norm_(self.agent.critic.parameters(), self.max_grad_norm)
@@ -92,31 +103,36 @@ class APPOTrainer(ABC):
         # policy update
         self.policy_optimizer.zero_grad()
         total_approx_kl = 0
+        total_entropy = 0
         policy_loss = 0
         for start in range(0, batch_size, cp_batch_size):
             end = start + cp_batch_size 
             if end > batch_size:
                 end = batch_size
             cp_weight = (end - start) / batch_size
-            cp_obs_batch, cp_act_batch, cp_adv_batch, cp_log_probs_batch = observations[start:end], action_tokens[start:end], advantages[start:end], log_probs[start:end]
-            log_prob_infer, entropy = self.agent.get_joint_action_log_probs(cp_obs_batch, cp_act_batch)
+            cp_obs_batch, cp_act_batch, cp_adv_batch, cp_log_probs_batch = rollout_observations[start:end], action_tokens[start:end], advantages[start:end], log_probs[start:end]
+            log_prob_infer, cp_entropy = self.agent.get_joint_action_log_probs(cp_obs_batch, cp_act_batch, agent_to_train)
             if cp_batch_size > 1:
                 cp_adv_batch = (cp_adv_batch - cp_adv_batch.mean()) / (cp_adv_batch.std() + 1e-8)
-            cp_policy_loss, approx_kl = self.cal_policy_loss(log_prob_infer, cp_log_probs_batch, cp_adv_batch, entropy)
+            if agent_to_train is not None:
+                cp_log_probs_batch = cp_log_probs_batch[:, agent_to_train: agent_to_train + 1]
+                cp_adv_batch = cp_adv_batch[:, agent_to_train: agent_to_train + 1]
+            cp_policy_loss, approx_kl = self.cal_policy_loss(log_prob_infer, cp_log_probs_batch, cp_adv_batch, cp_entropy)
             total_approx_kl += approx_kl * cp_weight
+            total_entropy += cp_entropy.mean().item() * cp_weight
             cp_policy_loss = cp_policy_loss * cp_weight
             cp_policy_loss.backward()
             policy_loss += cp_policy_loss.item()
         if total_approx_kl > 0.02:
-            return value_loss, critic_grad_norm, 0, 0
+            return value_loss, critic_grad_norm, 0, 0, total_approx_kl, total_entropy
 
         policy_grad_norm = nn.utils.clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
         self.policy_optimizer.step()
         policy_grad_norm = policy_grad_norm.item()
 
-        return value_loss, critic_grad_norm, policy_loss, policy_grad_norm
+        return value_loss, critic_grad_norm, policy_loss, policy_grad_norm, total_approx_kl, total_entropy
 
-    def train(self, buffer: LanguageBuffer):
+    def train(self, buffer: LanguageBuffer, global_steps: int):
         """
         Perform a training update using minibatch GD.
         :param buffer: (SharedReplayBuffer) buffer containing training data.
@@ -127,18 +143,22 @@ class APPOTrainer(ABC):
             "value_loss": 0,
             "value_grad_norm": 0,
             "policy_loss": 0,
-            "policy_grad_norm": 0
+            "policy_grad_norm": 0,
+            "approx_kl": 0,
+            "entropy": 0,
         }
 
         update_time = 0
         for _ in range(self.ppo_epoch):
             data_generator = buffer.appo_sampler(self.num_mini_batch)
             for sample in data_generator:
-                value_loss, value_grad_norm, policy_loss, policy_grad_norm = self.ppo_update(sample)
+                value_loss, value_grad_norm, policy_loss, policy_grad_norm, approx_kl, entropy = self.ppo_update(sample, global_steps)
                 train_info["value_loss"] += value_loss
                 train_info["value_grad_norm"] += value_grad_norm
                 train_info["policy_loss"] += policy_loss
                 train_info["policy_grad_norm"] += policy_grad_norm
+                train_info["approx_kl"] += approx_kl
+                train_info["entropy"] += entropy
                 update_time += 1
 
         for k in train_info.keys():
