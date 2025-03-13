@@ -160,7 +160,7 @@ class Actor:
                 action_token = sequences[i][input_ids[i].shape[0] :]
                 all_action_tokens[i, agent_idx, : action_token.shape[0]] = action_token.clone()
                 action = self.tokenizer.decode(action_token, skip_special_tokens=True)
-                prompts[i] = prompts[i] + action + "\n"
+                prompts[i] = prompts[i] + action + "<|im_end|>\n"
                 actions.append(action)
             actions = np.array(actions, dtype=np.object_)
             all_obs[:, agent_idx] = np.array(prompts_with_profile, dtype=np.object_)
