@@ -96,10 +96,12 @@ class MathRunner:
 
             # log info
             if episode % self.log_interval == 0:
+                avg_step_reward = np.mean(self.buffer.rewards[self.buffer.pre_batch_index, :, :, -1])
                 progress_bar.set_description(
                     f"Episode {episode}/{episodes}"
-                    f"(total step num: {total_num_steps} | average step reward: {np.mean(self.buffer.rewards[self.buffer.pre_batch_index, :, :, -1]):.4f})",
+                    f"(total step num: {total_num_steps} | average step reward: {avg_step_reward:.4f})",
                 )
+                train_infos["average_step_rewards"] = avg_step_reward
                 self.log_train(train_infos, total_num_steps)
             progress_bar.update(1)
 
@@ -137,7 +139,6 @@ class MathRunner:
             raise NotImplementedError
 
     def log_train(self, train_infos, total_num_steps):
-        train_infos["average_step_rewards"] = np.mean(self.buffer.rewards)
         for k, v in train_infos.items():
             self.writter.add_scalars(k, {k: v}, total_num_steps)
 
