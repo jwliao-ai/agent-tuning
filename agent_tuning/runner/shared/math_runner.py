@@ -114,11 +114,11 @@ class MathRunner:
         masks[dones_env == True] = np.zeros(((dones_env == True).sum(), self.num_agents), dtype=np.float32)
 
         if self.algo == "APPO":
-            self.buffer.insert_appo(next_obs, actions, values, rewards, masks, action_tokens, log_probs)
+            self.buffer.insert_appo(next_obs, actions, rollout_obs, values, rewards, masks, action_tokens, log_probs)
         elif self.algo == "TPPO":
             self.buffer.insert_tppo(next_obs, actions, rollout_obs, values, rewards, masks, action_tokens, log_probs)
         elif self.algo == "POAD":
-            self.buffer.insert_poad(next_obs, actions, values, rewards, masks, action_tokens, log_probs)
+            self.buffer.insert_poad(next_obs, actions, rollout_obs, values, rewards, masks, action_tokens, log_probs)
         else:
             raise NotImplementedError
 

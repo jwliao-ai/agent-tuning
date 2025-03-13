@@ -49,9 +49,10 @@ class LanguageBuffer(object):
 
         self.step = 0
 
-    def insert_appo(self, obs, actions, value_preds, rewards, masks, action_tokens, action_log_probs):
-        self.obs[self.cur_batch_index, self.step + 1] = obs.copy()
+    def insert_appo(self, next_obs, actions, rollout_obs, value_preds, rewards, masks, action_tokens, action_log_probs):
+        self.obs[self.cur_batch_index, self.step + 1] = next_obs.copy()
         self.actions[self.cur_batch_index, self.step] = actions.copy()
+        self.rollout_obs[self.cur_batch_index, self.step] = rollout_obs.copy()
         self.rewards[self.cur_batch_index, self.step] = rewards.copy()
         self.masks[self.cur_batch_index, self.step + 1] = masks.copy()
         self.action_tokens[self.cur_batch_index, self.step] = action_tokens.copy()
@@ -59,8 +60,8 @@ class LanguageBuffer(object):
         self.action_level_log_probs[self.cur_batch_index, self.step] = action_log_probs.copy()
         self.step = (self.step + 1) % self.episode_length
 
-    def insert_tppo(self, obs, actions, rollout_obs, value_preds, rewards, masks, action_tokens, token_log_probs):
-        self.obs[self.cur_batch_index, self.step + 1] = obs.copy()
+    def insert_tppo(self, next_obs, actions, rollout_obs, value_preds, rewards, masks, action_tokens, token_log_probs):
+        self.obs[self.cur_batch_index, self.step + 1] = next_obs.copy()
         self.actions[self.cur_batch_index, self.step] = actions.copy()
         self.rollout_obs[self.cur_batch_index, self.step] = rollout_obs.copy()
         self.rewards[self.cur_batch_index, self.step] = rewards.copy()
@@ -70,9 +71,10 @@ class LanguageBuffer(object):
         self.tppo_log_probs[self.cur_batch_index, self.step] = token_log_probs.copy()
         self.step = (self.step + 1) % self.episode_length
 
-    def insert_poad(self, obs, actions, value_preds, rewards, masks, action_tokens, token_log_probs):
-        self.obs[self.cur_batch_index, self.step + 1] = obs.copy()
+    def insert_poad(self, next_obs, actions, rollout_obs, value_preds, rewards, masks, action_tokens, token_log_probs):
+        self.obs[self.cur_batch_index, self.step + 1] = next_obs.copy()
         self.actions[self.cur_batch_index, self.step] = actions.copy()
+        self.rollout_obs[self.cur_batch_index, self.step] = rollout_obs.copy()
         self.rewards[self.cur_batch_index, self.step] = rewards.copy()
         self.masks[self.cur_batch_index, self.step + 1] = masks.copy()
         self.action_tokens[self.cur_batch_index, self.step] = action_tokens.copy()
@@ -210,6 +212,7 @@ class LanguageBuffer(object):
         # keep (num_agent, dim)
         obs = self.obs[:, :-1].reshape(-1, *self.obs.shape[3:])
         actions = self.actions.reshape(-1, *self.actions.shape[3:])
+        rollout_obs = self.rollout_obs[:, :-1].reshape(-1, *self.rollout_obs.shape[3:])
         value_preds = self.action_level_v_values[:, :-1].reshape(-1, *self.action_level_v_values.shape[3:])
         returns = self.action_level_returns.reshape(-1, *self.action_level_returns.shape[3:])
         advantages = self.action_level_advantages.reshape(-1, *self.action_level_advantages.shape[3:])
@@ -223,12 +226,13 @@ class LanguageBuffer(object):
             # o_a_embd_batch = o_a_embds[indices].reshape(-1, *o_a_embds.shape[2:])
             obs_batch = obs[indices]
             action_batch = actions[indices]
+            rollout_obs_batch = rollout_obs[indices]
             value_preds_batch = value_preds[indices]
             return_batch = returns[indices]
             advantages_batch = advantages[indices]
             log_prob_batch = log_prob[indices]
             action_tokens_batch = action_tokens[indices]
-            yield obs_batch, action_batch, log_prob_batch, value_preds_batch, return_batch, advantages_batch, action_tokens_batch
+            yield obs_batch, action_batch, rollout_obs_batch, log_prob_batch, value_preds_batch, return_batch, advantages_batch, action_tokens_batch
 
     def tppo_sampler(self, num_mini_batch: int = None, mini_batch_size: int = None):
         """
@@ -297,6 +301,7 @@ class LanguageBuffer(object):
         # keep (num_agent, (max_new_tokens))
         obs = self.obs[:, :-1].reshape(-1, *self.obs.shape[3:])
         actions = self.actions.reshape(-1, *self.actions.shape[3:])
+        rollout_obs = self.rollout_obs[:, :-1].reshape(-1, *self.rollout_obs.shape[3:])
         value_preds = self.tppo_values[:, :-1].reshape(-1, *self.tppo_values.shape[3:])
         returns = self.tppo_returns.reshape(-1, *self.tppo_returns.shape[3:])
         advantages = self.tppo_advantages.reshape(-1, *self.tppo_advantages.shape[3:])
@@ -310,9 +315,10 @@ class LanguageBuffer(object):
             # o_a_embd_batch = o_a_embds[indices].reshape(-1, *o_a_embds.shape[2:])
             obs_batch = obs[indices]
             action_batch = actions[indices]
+            rollout_obs_batch = rollout_obs[indices]
             value_preds_batch = value_preds[indices]
             return_batch = returns[indices]
             advantages_batch = advantages[indices]
             log_prob_batch = log_prob[indices]
             action_tokens_batch = action_tokens[indices]
-            yield obs_batch, action_batch, log_prob_batch, value_preds_batch, return_batch, advantages_batch, action_tokens_batch
+            yield obs_batch, action_batch, rollout_obs_batch, log_prob_batch, value_preds_batch, return_batch, advantages_batch, action_tokens_batch
