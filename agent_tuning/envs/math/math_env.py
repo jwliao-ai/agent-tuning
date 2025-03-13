@@ -24,7 +24,6 @@ def extract_groundtruth(groundtruth_str: str) -> str:
     return parse_ground_truth(groundtruth_str, data_name='math')
 
 def judge_correct(extracted_groundtruth: Optional[str], answer: str) -> bool:
-    # return grade_answer(given_answer=answer, ground_truth=extracted_groundtruth)
     result = math_equal(answer, extracted_groundtruth)
     return result
 
@@ -39,7 +38,7 @@ class MathEnv:
         self.profiles = load_profiles(profile_path)
         self.n_agents = num_agents
         assert self.n_agents == len(self.profiles), "Number of agents must match the number of profiles."
-        self.max_step = 3
+        self.max_step = 1
         self.step_count = 0
         
         self.problem = None
@@ -50,7 +49,7 @@ class MathEnv:
         problem_answer_pair = random.choice(self.dataset)
         self.problem = problem_answer_pair["problem"]
         self.label = problem_answer_pair["final_answer"]
-        self.current_state = self.problem + "\n"
+        self.current_state = '<|im_start|>problem: ' + self.problem + "<|im_end|>\n"
         self.history = []
         obs = np.array([self.current_state for _ in range(self.n_agents)], dtype=np.object_)
         self.step_count = 0
