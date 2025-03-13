@@ -29,7 +29,10 @@ class APPOTrainer(ABC):
         self.opti_eps = args.opti_eps
         self.gradient_cp_steps = args.gradient_cp_steps
 
-        self.policy_optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.agent.actor.parameters()), lr=self.lr, eps=1e-5, weight_decay=0)
+        self.policy_optimizer = {}
+        for agent_idx in range(self.num_agent):
+            self.agent.actor.set_adapter(self.agent.profiles[agent_idx]["role"])
+            self.policy_optimizer[self.agent.profiles[agent_idx]["role"]] = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.agent.actor.parameters()), lr=self.lr, eps=1e-5, weight_decay=0)
         self.critic_optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.agent.critic.parameters()), lr=self.critic_lr, eps=1e-5)
 
     def cal_policy_loss(self, log_prob_infer: torch.Tensor, log_prob_batch: torch.Tensor, advantages_batch: torch.Tensor, entropy: torch.Tensor):
@@ -101,10 +104,11 @@ class APPOTrainer(ABC):
 
         torch.cuda.empty_cache()
         # policy update
-        self.policy_optimizer.zero_grad()
+        for optimizer in self.policy_optimizer.values(): optimizer.zero_grad()
         total_approx_kl = 0
         total_entropy = 0
         policy_loss = 0
+        total_policy_grad_norm = 0
         for start in range(0, batch_size, cp_batch_size):
             end = start + cp_batch_size 
             if end > batch_size:
@@ -126,11 +130,19 @@ class APPOTrainer(ABC):
         if total_approx_kl > 0.02:
             return value_loss, critic_grad_norm, 0, 0, total_approx_kl, total_entropy
 
-        policy_grad_norm = nn.utils.clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
-        self.policy_optimizer.step()
-        policy_grad_norm = policy_grad_norm.item()
+        if agent_to_train is not None:
+            self.agent.actor.set_adapter(self.agent.profiles[agent_to_train]['role'])
+            policy_grad_norm = nn.utils.clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
+            self.policy_optimizer[self.agent.profiles[agent_to_train]['role']].step()
+            total_policy_grad_norm = policy_grad_norm.item()
+        else:
+            for profile in self.agent.profiles:
+                self.agent.actor.set_adapter(profile['role'])
+                policy_grad_norm = nn.utils.clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
+                self.policy_optimizer[profile['role']].step()
+                total_policy_grad_norm += policy_grad_norm.item()
 
-        return value_loss, critic_grad_norm, policy_loss, policy_grad_norm, total_approx_kl, total_entropy
+        return value_loss, critic_grad_norm, policy_loss, total_policy_grad_norm, total_approx_kl, total_entropy
 
     def train(self, buffer: LanguageBuffer, global_steps: int):
         """
