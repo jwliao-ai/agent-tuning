@@ -327,16 +327,28 @@ class Actor:
         log_probs = torch.empty(logits.shape[0], logits.shape[1]).to(logits.device)
         entropies = torch.empty(logits.shape[0], logits.shape[1]).to(logits.device)
         for thread in range(logits.shape[0]):
-            for agent in range(logits.shape[1]):
-                act_token_length = self.get_last_token_position(action_tokens[thread, agent]) + 1
-                log_softmax_slice = pi_log_softmax[thread, agent, :act_token_length, :]
-                action_token_slice = action_tokens[thread, agent, :act_token_length]
-                token_log_probs = torch.gather(log_softmax_slice, -1, action_token_slice.unsqueeze(-1)).squeeze(-1)
-                action_log_prob = token_log_probs.sum()
-                log_probs[thread, agent] = action_log_prob
-                entropy = Categorical(logits=logits[thread, agent, :act_token_length, :]).entropy().mean()
-                entropies[thread, agent] = entropy
-
+            for agent in range(self.num_agents):
+                if agent_to_train is None:
+                    act_token_length = self.get_last_token_position(action_tokens[thread, agent]) + 1
+                    log_softmax_slice = pi_log_softmax[thread, agent, :act_token_length, :]
+                    action_token_slice = action_tokens[thread, agent, :act_token_length]
+                    token_log_probs = torch.gather(log_softmax_slice, -1, action_token_slice.unsqueeze(-1)).squeeze(-1)
+                    action_log_prob = token_log_probs.sum()
+                    log_probs[thread, agent] = action_log_prob
+                    entropy = Categorical(logits=logits[thread, agent, :act_token_length, :]).entropy().mean()
+                    entropies[thread, agent] = entropy
+                else:
+                    if agent == agent_to_train:
+                        act_token_length = self.get_last_token_position(action_tokens[thread, agent]) + 1
+                        log_softmax_slice = pi_log_softmax[thread, 0, :act_token_length, :]
+                        action_token_slice = action_tokens[thread, agent, :act_token_length]
+                        token_log_probs = torch.gather(log_softmax_slice, -1, action_token_slice.unsqueeze(-1)).squeeze(-1)
+                        action_log_prob = token_log_probs.sum()
+                        log_probs[thread, 0] = action_log_prob
+                        entropy = Categorical(logits=logits[thread, 0, :act_token_length, :]).entropy().mean()
+                        entropies[thread, 0] = entropy
+                    else:
+                        continue
         return log_probs, entropies
 
     @torch.no_grad()

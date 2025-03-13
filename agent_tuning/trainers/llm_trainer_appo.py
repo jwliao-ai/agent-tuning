@@ -87,7 +87,8 @@ class APPOTrainer(ABC):
             if end > batch_size:
                 end = batch_size
             cp_weight = (end - start) / batch_size  # Weight for the chunk loss
-            cp_obs_batch, cp_value_preds_batch, cp_returns_batch = observations[start:end], value_preds[start:end], returns[start:end]
+            cp_obs_batch, cp_value_preds_batch, cp_returns_batch = \
+                observations[start:end], value_preds[start:end], returns[start:end]
             values_infer = self.agent.get_action_values(cp_obs_batch)
             cp_value_loss = self.cal_value_loss(values_infer, cp_value_preds_batch, cp_returns_batch)
             cp_value_loss *= cp_weight  # Scale the loss by the chunk weight
@@ -114,7 +115,8 @@ class APPOTrainer(ABC):
             if end > batch_size:
                 end = batch_size
             cp_weight = (end - start) / batch_size
-            cp_obs_batch, cp_act_batch, cp_adv_batch, cp_log_probs_batch = rollout_observations[start:end], action_tokens[start:end], advantages[start:end], log_probs[start:end]
+            cp_obs_batch, cp_act_batch, cp_adv_batch, cp_log_probs_batch = \
+                rollout_observations[start:end], action_tokens[start:end], advantages[start:end], log_probs[start:end]
             log_prob_infer, cp_entropy = self.agent.get_joint_action_log_probs(cp_obs_batch, cp_act_batch, agent_to_train)
             if cp_batch_size > 1:
                 cp_adv_batch = (cp_adv_batch - cp_adv_batch.mean()) / (cp_adv_batch.std() + 1e-8)
