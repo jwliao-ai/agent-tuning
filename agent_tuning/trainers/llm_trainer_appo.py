@@ -78,8 +78,8 @@ class APPOTrainer(ABC):
             print(f"gradient_cp_steps > batch_size, set cp_batch_size = 1")
             cp_batch_size = 1
 
-        torch.cuda.empty_cache()
         # critic update with checkpoint gradient accumulation
+        torch.cuda.empty_cache()
         self.critic_optimizer.zero_grad()
         value_loss = 0
         for start in range(0, batch_size, cp_batch_size):
@@ -88,7 +88,7 @@ class APPOTrainer(ABC):
                 end = batch_size
             cp_weight = (end - start) / batch_size  # Weight for the chunk loss
             cp_obs_batch, cp_value_preds_batch, cp_returns_batch = \
-                observations[start:end], value_preds[start:end], returns[start:end]
+                rollout_observations[start:end], value_preds[start:end], returns[start:end]
             values_infer = self.agent.get_action_values(cp_obs_batch)
             cp_value_loss = self.cal_value_loss(values_infer, cp_value_preds_batch, cp_returns_batch)
             cp_value_loss *= cp_weight  # Scale the loss by the chunk weight
@@ -103,13 +103,13 @@ class APPOTrainer(ABC):
         self.critic_optimizer.step()
         critic_grad_norm = critic_grad_norm.item()
 
-        torch.cuda.empty_cache()
         # policy update
+        torch.cuda.empty_cache()
         for optimizer in self.policy_optimizer.values(): optimizer.zero_grad()
-        total_approx_kl = 0
-        total_entropy = 0
-        policy_loss = 0
-        total_policy_grad_norm = 0
+        total_approx_kl = 0.
+        total_entropy = 0.
+        policy_loss = 0.
+        total_policy_grad_norm = 0.
         for start in range(0, batch_size, cp_batch_size):
             end = start + cp_batch_size 
             if end > batch_size:
@@ -118,8 +118,8 @@ class APPOTrainer(ABC):
             cp_obs_batch, cp_act_batch, cp_adv_batch, cp_log_probs_batch = \
                 rollout_observations[start:end], action_tokens[start:end], advantages[start:end], log_probs[start:end]
             log_prob_infer, cp_entropy = self.agent.get_joint_action_log_probs(cp_obs_batch, cp_act_batch, agent_to_train)
-            if cp_batch_size > 1:
-                cp_adv_batch = (cp_adv_batch - cp_adv_batch.mean()) / (cp_adv_batch.std() + 1e-8)
+            # if cp_batch_size > 1:
+            #     cp_adv_batch = (cp_adv_batch - cp_adv_batch.mean()) / (cp_adv_batch.std() + 1e-8)
             if agent_to_train is not None:
                 cp_log_probs_batch = cp_log_probs_batch[:, agent_to_train: agent_to_train + 1]
                 cp_adv_batch = cp_adv_batch[:, agent_to_train: agent_to_train + 1]
