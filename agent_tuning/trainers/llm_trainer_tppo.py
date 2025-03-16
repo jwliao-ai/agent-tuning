@@ -79,16 +79,16 @@ class TPPOTrainer(ABC):
         agent_to_train = None
         if self.agent_iteration_interval > 0:
             time_slice = global_steps // self.agent_iteration_interval
-            agent_to_train = time_slice % self.num_agent
+            agent_to_train = (time_slice + 1) % self.num_agent
 
         observations, actions, rollout_observations, log_probs, value_preds, \
             returns, advantages, action_tokens = sample
             
-        advantages_copy = advantages.copy()
-        advantages_copy[advantages_copy == 0.0] = np.nan
-        mean_advantages = np.nanmean(advantages_copy)
-        std_advantages = np.nanstd(advantages_copy)
-        advantages = (advantages - mean_advantages) / (std_advantages + 1e-8)
+        # advantages_copy = advantages.copy()
+        # advantages_copy[advantages_copy == 0.0] = np.nan
+        # mean_advantages = np.nanmean(advantages_copy)
+        # std_advantages = np.nanstd(advantages_copy)
+        # advantages = (advantages - mean_advantages) / (std_advantages + 1e-8)
 
         actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens = \
             to_cuda((actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens))
@@ -99,27 +99,24 @@ class TPPOTrainer(ABC):
         if cp_batch_size == 0:
             print(f"gradient_cp_steps > batch_size, set cp_batch_size = 1")
             cp_batch_size = 1
-        # print(f"[trainer] batch_size: {batch_size}")
-        # print(f"[trainer] cp_batch_size: {cp_batch_size}")
 
         # critic update
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         self.critic_optimizer.zero_grad()
         value_loss = 0
         for start in range(0, batch_size, cp_batch_size):
             end = start + cp_batch_size
             if end > batch_size:
                 end = batch_size
-            cp_weight = (end - start) / batch_size  # Weight for the chunk loss
+            cp_weight = (end - start) / batch_size
             cp_obs_batch, cp_action_tokens_batch, cp_value_preds_batch, cp_returns_batch, cp_token_mask = \
                 rollout_observations[start:end], action_tokens[start:end], value_preds[start:end], returns[start:end], token_mask[start:end]
-            values_infer = self.agent.get_token_values(cp_obs_batch, cp_action_tokens_batch, train=True).squeeze(-1) # .squeeze(-1)?
+            values_infer = self.agent.get_token_values(cp_obs_batch, cp_action_tokens_batch, train=True).squeeze(-1)
             cp_value_loss = self.cal_value_loss(values_infer, cp_value_preds_batch, cp_returns_batch, cp_token_mask)
             cp_value_loss *= cp_weight
             cp_value_loss.backward()
             value_loss += cp_value_loss.item()
-            del cp_obs_batch, cp_action_tokens_batch, cp_value_preds_batch, cp_returns_batch, cp_token_mask
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
         if self._use_max_grad_norm:
             critic_grad_norm = nn.utils.clip_grad_norm_(self.agent.critic.parameters(), self.max_grad_norm)
         else:
@@ -128,11 +125,12 @@ class TPPOTrainer(ABC):
         critic_grad_norm = critic_grad_norm.item()
 
         # policy update
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         for optimizer in self.policy_optimizer.values(): optimizer.zero_grad()
-        total_approx_kl = 0
-        total_entropy = 0
-        policy_loss = 0
+        total_approx_kl = 0.
+        total_entropy = 0.
+        policy_loss = 0.
+        total_policy_grad_norm = 0.
         for start in range(0, batch_size, cp_batch_size):
             end = start + cp_batch_size
             if end > batch_size:
@@ -150,28 +148,28 @@ class TPPOTrainer(ABC):
             log_prob_infer = torch.gather(pi_log_prob, -1, cp_action_tokens_batch.unsqueeze(-1)).squeeze(-1)
             entropy = Categorical(logits=logits_infer).entropy()
             cp_policy_loss, approx_kl, cp_entropy = self.cal_policy_loss(log_prob_infer, cp_log_prob_batch, cp_adv_batch, entropy, cp_token_mask)
-            total_approx_kl += approx_kl * cp_weight
-            total_entropy += cp_entropy * cp_weight
+            total_approx_kl += approx_kl.item() * cp_weight
+            total_entropy += cp_entropy.item() * cp_weight
             cp_policy_loss *= cp_weight
             cp_policy_loss.backward()
             policy_loss += cp_policy_loss.item()
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
         if total_approx_kl > 0.02:
-            return value_loss, critic_grad_norm, 0, 0, 0
+            return value_loss, critic_grad_norm, 0, 0, total_approx_kl, total_entropy
         
         if agent_to_train is not None:
             self.agent.actor.set_adapter(self.agent.profiles[agent_to_train]['role'])
             policy_grad_norm = nn.utils.clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
             self.policy_optimizer[self.agent.profiles[agent_to_train]['role']].step()
+            total_policy_grad_norm = policy_grad_norm.item()
         else:
             for profile in self.agent.profiles:
                 self.agent.actor.set_adapter(profile['role'])
                 policy_grad_norm = nn.utils.clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
                 self.policy_optimizer[profile['role']].step()
+                total_policy_grad_norm += policy_grad_norm.item()
 
-        policy_grad_norm = policy_grad_norm.item()
-
-        return value_loss, critic_grad_norm, policy_loss, policy_grad_norm, total_entropy
+        return value_loss, critic_grad_norm, policy_loss, policy_grad_norm, total_approx_kl, total_entropy
 
     def train(self, buffer: LanguageBuffer, global_steps: int):
         """
@@ -181,18 +179,20 @@ class TPPOTrainer(ABC):
 
         :return train_info: (dict) contains information regarding training update (e.g. loss, grad norms, etc).
         """
-        train_info = {}
-        train_info["value_loss"] = 0
-        train_info["value_grad_norm"] = 0
-        train_info["policy_loss"] = 0
-        train_info["policy_grad_norm"] = 0
-        train_info["entropy"] = 0
+        train_info = {
+            "value_loss": 0.,
+            "value_grad_norm": 0.,
+            "policy_loss": 0.,
+            "policy_grad_norm": 0.,
+            "entropy": 0.,
+            "approx_kl": 0.,
+        }
 
         update_time = 0
         for _ in range(self.ppo_epoch):
             data_generator = buffer.tppo_sampler(self.num_mini_batch)
             for sample in data_generator:
-                value_loss, value_grad_norm, policy_loss, policy_grad_norm, entropy = (
+                value_loss, value_grad_norm, policy_loss, policy_grad_norm, approx_kl, entropy = (
                     self.ppo_update(sample, global_steps)
                 )
                 train_info["value_loss"] += value_loss
@@ -200,6 +200,7 @@ class TPPOTrainer(ABC):
                 train_info["policy_loss"] += policy_loss
                 train_info["policy_grad_norm"] += policy_grad_norm
                 train_info["entropy"] += entropy
+                train_info["approx_kl"] += approx_kl
                 update_time += 1
 
         for k in train_info.keys():
