@@ -32,6 +32,7 @@ class Actor:
             num_agents: int, 
             profile_path: str | os.PathLike,
             algo: str, 
+            normalization_mode: str = "sum",
             load_path: str = None,
             load_in_4bit: bool = False,
             bf16: bool = True,
@@ -39,6 +40,7 @@ class Actor:
         ):
         self.device = "cuda:0"
         self.algo = algo
+        self.normalization_mode = normalization_mode
         self.num_agents = num_agents
         if load_in_4bit:
             assert bf16, "we only support bnb_4bit_compute_dtype = bf16"
@@ -170,21 +172,6 @@ class Actor:
 
         return all_obs, all_actions, all_action_tokens
 
-    def get_action_values(self, obs: np.ndarray) -> torch.Tensor:
-        """
-        Args:
-            obs: np.ndarray of shape (rollout_threads, num_agents)
-
-        Returns:
-            action_values: torch.Tensor of shape (rollout_threads, num_agents, 1)
-        """
-        inputs = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, truncation=True, max_length=self.context_window)
-        input_ids = inputs["input_ids"].cuda()
-        attention_mask = inputs["attention_mask"].cuda()
-
-        with self.actor.disable_adapter():
-            action_values = self.critic(input_ids, attention_mask=attention_mask).unsqueeze(-1).repeat(1, obs.shape[1])
-        return action_values
 
     def get_slice(self, logits: torch.Tensor, obs_full_lengths: int, act_real_lengths: torch.Tensor) -> torch.Tensor:
         """
@@ -207,6 +194,34 @@ class Actor:
                     end_idx = start_idx + act_real_lengths[thread_idx, agent_idx]
                 sliced_logits[thread_idx, agent_idx, : act_real_lengths[thread_idx, agent_idx]] = logits[thread_idx, start_idx:end_idx].clone()
         return sliced_logits
+    
+    def get_action_values(self, obs: np.ndarray) -> torch.Tensor:
+        """
+        Args:
+            obs: np.ndarray of shape (rollout_threads, num_agents)
+
+        Returns:
+            action_values: torch.Tensor of shape (rollout_threads, num_agents, 1)
+        """
+        rollout_threads, num_agents = obs.shape
+        all_values = []
+        for agent_idx in range(self.num_agents):
+            token_seq = self.tokenizer(obs[:, agent_idx].tolist(), return_tensors="pt", padding=True, truncation=True, max_length=self.context_window)
+            input_ids = token_seq["input_ids"].cuda()
+            attn_mask = token_seq["attention_mask"].cuda()
+
+            with self.actor.disable_adapter():
+                values = self.critic(input_ids, attention_mask=attn_mask).unsqueeze(-1)
+            all_values.append(values)
+        all_values = torch.cat(all_values, dim=1)
+        return all_values
+        # inputs = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True, truncation=True, max_length=self.context_window)
+        # input_ids = inputs["input_ids"].cuda()
+        # attention_mask = inputs["attention_mask"].cuda()
+
+        # with self.actor.disable_adapter():
+        #     action_values = self.critic(input_ids, attention_mask=attention_mask).unsqueeze(-1).repeat(1, obs.shape[1])
+        # return action_values
 
     def get_token_values(self, obs: np.ndarray, action_tokens: torch.Tensor, train: bool = False) -> torch.Tensor:
         """
@@ -311,6 +326,26 @@ class Actor:
         while action_tokens[pos] == self.tokenizer.pad_token_id: pos -= 1
         return pos
 
+    def normalize_log_probs(self, action_log_probs: torch.Tensor, action_token_slice: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize the log probs by the number of tokens in the action sequence.
+
+        Args:
+            action_log_probs: torch.Tensor of shape (1)
+            action_token_slice: torch.Tensor of shape (token_length)
+        """
+        if self.normalization_mode == "token":
+            token_length = self.get_last_token_position(action_token_slice) + 1
+            action_log_probs /= token_length
+        elif self.normalization_mode == "word":
+            word_num = len(self.tokenizer.decode(action_token_slice, skip_special_tokens=True).split())
+            action_log_probs /= word_num
+        elif self.normalization_mode == "sum":
+            pass
+        else:
+            raise NotImplementedError
+        return action_log_probs
+
     def get_joint_action_log_probs(self, obs: np.ndarray, action_tokens: torch.Tensor, agent_to_train: int = None, batch_infer: bool = False):
         """
         Args:
@@ -333,7 +368,7 @@ class Actor:
                     log_softmax_slice = pi_log_softmax[thread, agent, :act_token_length, :]
                     action_token_slice = action_tokens[thread, agent, :act_token_length]
                     token_log_probs = torch.gather(log_softmax_slice, -1, action_token_slice.unsqueeze(-1)).squeeze(-1)
-                    action_log_prob = token_log_probs.sum()
+                    action_log_prob = self.normalize_log_probs(token_log_probs.sum(), action_token_slice)
                     log_probs[thread, agent] = action_log_prob
                     entropy = Categorical(logits=logits[thread, agent, :act_token_length, :]).entropy().mean()
                     entropies[thread, agent] = entropy
@@ -343,7 +378,7 @@ class Actor:
                         log_softmax_slice = pi_log_softmax[thread, 0, :act_token_length, :]
                         action_token_slice = action_tokens[thread, agent, :act_token_length]
                         token_log_probs = torch.gather(log_softmax_slice, -1, action_token_slice.unsqueeze(-1)).squeeze(-1)
-                        action_log_prob = token_log_probs.sum()
+                        action_log_prob = self.normalize_log_probs(token_log_probs.sum(), action_token_slice)
                         log_probs[thread, 0] = action_log_prob
                         entropy = Categorical(logits=logits[thread, 0, :act_token_length, :]).entropy().mean()
                         entropies[thread, 0] = entropy
@@ -355,7 +390,7 @@ class Actor:
     def infer_for_rollout(self, obs):
         rollout_obs, rollout_actions, rollout_action_tokens = self.get_actions_sequential(obs)
         if self.algo == "APPO": # TODO: need update for rollout_obs
-            rollout_values = self.get_action_values(obs)
+            rollout_values = self.get_action_values(rollout_obs)
             rollout_values = rollout_values.float().cpu().numpy()
             action_log_probs, _ = self.get_joint_action_log_probs(rollout_obs, rollout_action_tokens, batch_infer=False)
             rollout_action_tokens = rollout_action_tokens.int().cpu().numpy()

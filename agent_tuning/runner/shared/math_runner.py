@@ -31,7 +31,8 @@ class MathRunner:
             max_new_tokens=self.all_args.max_new_tokens, 
             num_agents=self.num_agents,
             profile_path=self.all_args.profile_path,
-            algo=self.algo
+            algo=self.algo,
+            normalization_mode=self.all_args.normalization_mode,
         )
         
         self.buffer = LanguageBuffer(self.all_args, self.num_agents, self.agent.tokenizer.pad_token_id)

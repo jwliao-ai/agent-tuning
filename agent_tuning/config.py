@@ -157,6 +157,7 @@ def get_config():
 
     # prepare parameters
     parser.add_argument("--algorithm_name", type=str, default="APPO", choices=["TPPO", "APPO", "POAD"])
+    parser.add_argument("--normalization_mode", type=str, default="sum", choices=["token", "word", "sum"], help="specify the normalization mode for APPO (use TWOSOME or not).")
     parser.add_argument("--agent_iteration_interval", type=int, default=0, help="the interval of agent iteration. if set 0, train concurrently.")
     parser.add_argument("--experiment_name", type=str, default="check", help="an identifier to distinguish different experiment.",)
     parser.add_argument("--seed", type=int, default=1, help="Random seed for numpy/torch.")
