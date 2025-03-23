@@ -38,11 +38,11 @@ class MathRunner:
         self.buffer = LanguageBuffer(self.all_args, self.num_agents, self.agent.tokenizer.pad_token_id)
 
         if self.algo == "APPO":
-            self.trainer = APPOTrainer(self.all_args, self.agent, self.num_agents)
+            self.trainer = APPOTrainer(self.all_args, self.agent)
         elif self.algo == "TPPO":
-            self.trainer = TPPOTrainer(self.all_args, self.agent, self.num_agents)
+            self.trainer = TPPOTrainer(self.all_args, self.agent)
         elif self.algo == "POAD":
-            self.trainer = POADTrainer(self.all_args, self.agent, self.num_agents)
+            self.trainer = POADTrainer(self.all_args, self.agent)
         else:
             raise NotImplementedError
         

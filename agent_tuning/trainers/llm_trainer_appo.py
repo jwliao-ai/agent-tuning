@@ -9,7 +9,7 @@ from agent_tuning.utils.util import get_gard_norm, huber_loss, mse_loss, to_cuda
 
 class APPOTrainer(ABC):
 
-    def __init__(self, args, agent: Actor, num_agents):
+    def __init__(self, args, agent: Actor):
         self.agent = agent
         self.num_agent = agent.num_agents
         self.tokenizer = agent.tokenizer

@@ -11,7 +11,7 @@ from agent_tuning.utils.language_buffer import LanguageBuffer
 
 class TPPOTrainer(ABC):
 
-    def __init__(self, args, agent: Actor, num_agents):
+    def __init__(self, args, agent: Actor):
         self.agent = agent
         self.num_agent = agent.num_agents
         self.agent_iteration_interval = args.agent_iteration_interval
