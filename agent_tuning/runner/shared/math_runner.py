@@ -26,7 +26,7 @@ class MathRunner:
         self.eval_envs = config["eval_envs"]
 
         self.agent = Actor(
-            model_name=self.all_args.model_name_or_path, 
+            model_path=self.all_args.model_name_or_path, 
             context_window=self.all_args.context_window,
             max_new_tokens=self.all_args.max_new_tokens, 
             num_agents=self.num_agents,
@@ -70,7 +70,7 @@ class MathRunner:
                 rollout_obs, actions, action_tokens, values, log_probs = self.agent.infer_for_rollout(self.buffer.obs[self.buffer.cur_batch_index, step])
                 next_obs, rewards, dones, infos = self.envs.step(actions)
 
-                # tokenized_obs = self.agent.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True)
+                # tokenized_obs = self.agent.tokenizer(rollout_obs[:, 0].tolist(), return_tensors="pt", padding=True)
                 # num_tokens = tokenized_obs["input_ids"].shape[1]
                 # print(f"[run] num_tokens: {num_tokens}")
 
