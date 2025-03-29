@@ -24,6 +24,7 @@ def make_train_env(all_args):
                 num_agents=all_args.n_agents,
                 profile_path=all_args.profile_path,
                 dataset_path=all_args.dataset_path,
+                horizon=all_args.horizon,
                 mode="train",
             )
             env.seed(all_args.seed + rank * 1000)
@@ -41,6 +42,7 @@ def make_eval_env(all_args):
                 num_agents=all_args.n_agents,
                 profile_path=all_args.profile_path,
                 dataset_path=all_args.dataset_path,
+                horizon=all_args.horizon,
                 mode="test",
             )
             env.seed(all_args.seed + rank * 5000)

@@ -1,7 +1,6 @@
 import numpy as np
 import json
 import random
-import pprint
 from typing import Optional
 from .parse_utils_qwen import extract_answer as extract_fn, parse_ground_truth
 from .grader import math_equal
@@ -29,7 +28,7 @@ def judge_correct(extracted_groundtruth: Optional[str], answer: str) -> bool:
 
 class MathEnv:
 
-    def __init__(self, rank, model_name, num_agents, profile_path, dataset_path, mode):
+    def __init__(self, rank, model_name, num_agents, profile_path, dataset_path, horizon, mode):
         
         self.rank = rank
         self.mode = mode
@@ -38,7 +37,7 @@ class MathEnv:
         self.profiles = load_profiles(profile_path)
         self.n_agents = num_agents
         assert self.n_agents == len(self.profiles), "Number of agents must match the number of profiles."
-        self.max_step = 1
+        self.max_steps = horizon
         self.step_count = 0
         
         self.problem = None
@@ -69,10 +68,10 @@ class MathEnv:
             if self._is_correct(action): 
                 score += 1.0
         score /= len(actions_to_check) # normalize
-        score /= self.step_count # penalize for more steps
         
-        if score > 0.0 or self.step_count >= self.max_step:
+        if score > 0.0 or self.step_count >= self.max_steps:
             dones = np.ones((self.n_agents), dtype=bool)
+            score -= self.step_count # penalize for more steps
         else:
             dones = np.zeros((self.n_agents), dtype=bool)
             
