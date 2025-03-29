@@ -7,6 +7,7 @@ from torch.distributions.categorical import Categorical
 from peft import (
     PeftModel,
     LoraConfig,
+    PeftConfig,
     get_peft_model,
     get_peft_model_state_dict,
     prepare_model_for_kbit_training,
@@ -26,17 +27,19 @@ class Actor:
 
     def __init__(
             self, 
-            model_name: str | os.PathLike, 
+            model_path: str | os.PathLike, 
             context_window: int, 
             max_new_tokens: int, 
             num_agents: int, 
             profile_path: str | os.PathLike,
-            algo: str, 
+            lora_path: str | os.PathLike = None,
+            algo: str = "APPO", 
             normalization_mode: str = "sum",
             load_path: str = None,
             load_in_4bit: bool = False,
             bf16: bool = True,
             device_map = None,
+            **kwargs,
         ):
         self.device = "cuda:0"
         self.algo = algo
@@ -53,14 +56,14 @@ class Actor:
         else:
             nf4_config = None
         self.base_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
+            model_path,
             trust_remote_code=True,
             torch_dtype=torch.bfloat16 if bf16 else 'auto',
             quantization_config=nf4_config, 
             device_map=device_map
         )
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name, 
+            model_path, 
             use_fast=False, 
             padding_side="left"
         )
@@ -73,15 +76,15 @@ class Actor:
         self.profiles = load_profiles(profile_path)
 
         if load_path is None:
-            self.actor = self._init_actor().to(self.device)
+            self.actor = self._init_actor(lora_path).to(self.device)
             self.critic = self._init_critic().to(self.device)
         else:
             self.load(load_path)
 
-    def _init_actor(self, lora_weights=None):
+    def _init_actor(self, lora_path=None):
         self.base_model.enable_input_require_grads()
         model = None
-        if lora_weights is None:
+        if lora_path is None:
             # Initialize all adapters from scratch
             for i in range(self.num_agents):
                 config = LoraConfig(
@@ -98,10 +101,17 @@ class Actor:
                     model.add_adapter(adapter_name=self.profiles[i]["role"], peft_config=config)
             model.print_trainable_parameters()
         else:
-            # Load pretrained adapters into the PeftModel
-            if len(lora_weights) != self.num_agents:
-                raise ValueError(f"Number of pretrained weights ({len(lora_weights)}) must match num_agent ({self.num_agents})")
-            pass  # Further implementation required
+            if not os.path.exists(lora_path):
+                raise ValueError(f"LoRA path does not exist: {lora_path}")
+            adapter_dirs = [d for d in os.listdir(lora_path) if os.path.isdir(os.path.join(lora_path, d))]
+            if len(adapter_dirs) != self.num_agents:
+                raise ValueError(f"Number of pretrained weights ({len(adapter_dirs)}) must match num_agent ({self.num_agents})")
+            for adapter_name in adapter_dirs:
+                adapter_path = os.path.join(lora_path, adapter_name)
+                if model is None:
+                    model = PeftModel.from_pretrained(self.base_model, adapter_path, adapter_name=adapter_name)
+                else:
+                    model.add_adapter(adapter_name=adapter_name, peft_config=PeftConfig.from_pretrained(adapter_path))
         # Apply half-precision across all adapters
         model.half()
         print(f"Initialized model with {self.num_agents} adapters.")
