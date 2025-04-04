@@ -84,11 +84,11 @@ class TPPOTrainer(ABC):
         observations, actions, rollout_observations, log_probs, value_preds, \
             returns, advantages, action_tokens = sample
             
-        # advantages_copy = advantages.copy()
-        # advantages_copy[advantages_copy == 0.0] = np.nan
-        # mean_advantages = np.nanmean(advantages_copy)
-        # std_advantages = np.nanstd(advantages_copy)
-        # advantages = (advantages - mean_advantages) / (std_advantages + 1e-8)
+        advantages_copy = advantages.copy()
+        advantages_copy[advantages_copy == 0.0] = np.nan
+        mean_advantages = np.nanmean(advantages_copy)
+        std_advantages = np.nanstd(advantages_copy)
+        advantages = (advantages - mean_advantages) / (std_advantages + 1e-8)
 
         actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens = \
             to_cuda((actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens))

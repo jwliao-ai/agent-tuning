@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 from abc import ABC
 import torch.nn.functional as F
 from agent_tuning.agents.actor import Actor
@@ -67,8 +68,15 @@ class APPOTrainer(ABC):
             time_slice = global_steps // self.agent_iteration_interval
             agent_to_train = time_slice % self.num_agent
 
-        observations, actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens = sample
+        observations, actions, rollout_observations, log_probs, value_preds, \
+            returns, advantages, action_tokens = sample
         
+        advantages_copy = advantages.copy()
+        advantages_copy[advantages_copy == 0.0] = np.nan
+        mean_advantages = np.nanmean(advantages_copy)
+        std_advantages = np.nanstd(advantages_copy)
+        advantages = (advantages - mean_advantages) / (std_advantages + 1e-8)
+
         actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens = \
             to_cuda((actions, rollout_observations, log_probs, value_preds, returns, advantages, action_tokens))
         
@@ -118,8 +126,6 @@ class APPOTrainer(ABC):
             cp_obs_batch, cp_act_batch, cp_adv_batch, cp_log_probs_batch = \
                 rollout_observations[start:end], action_tokens[start:end], advantages[start:end], log_probs[start:end]
             log_prob_infer, cp_entropy = self.agent.get_joint_action_log_probs(cp_obs_batch, cp_act_batch, agent_to_train)
-            # if cp_batch_size > 1:
-            #     cp_adv_batch = (cp_adv_batch - cp_adv_batch.mean()) / (cp_adv_batch.std() + 1e-8)
             if agent_to_train is not None:
                 cp_log_probs_batch = cp_log_probs_batch[:, agent_to_train: agent_to_train + 1]
                 cp_adv_batch = cp_adv_batch[:, agent_to_train: agent_to_train + 1]
