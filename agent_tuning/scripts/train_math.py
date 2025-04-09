@@ -61,6 +61,7 @@ def parse_args(args, parser):
     parser.add_argument("--max_new_tokens", type=int, default=256, help="max_new_tokens")
     parser.add_argument("--n_agents", type=int, default=1)
     parser.add_argument("--profile_path", type=str, default="agent_profiles.json", required=True)
+    parser.add_argument("--load_path", type=str, default=None, help="path to the checkpoint")
     all_args = parser.parse_known_args(args)[0]
     all_args.base_model = Path(all_args.model_name_or_path).parts[-1]
 

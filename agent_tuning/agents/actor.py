@@ -32,7 +32,6 @@ class Actor:
             max_new_tokens: int, 
             num_agents: int, 
             profile_path: str | os.PathLike,
-            lora_path: str | os.PathLike = None,
             algo: str = "APPO", 
             normalization_mode: str = "sum",
             load_path: str = None,
@@ -75,11 +74,8 @@ class Actor:
         self.max_new_tokens = max_new_tokens
         self.profiles = load_profiles(profile_path)
 
-        if load_path is None:
-            self.actor = self._init_actor(lora_path).to(self.device)
-            self.critic = self._init_critic().to(self.device)
-        else:
-            self.load(load_path)
+        self.actor = self._init_actor(load_path).to(self.device)
+        self.critic = self._init_critic(load_path).to(self.device)
 
     def _init_actor(self, lora_path=None):
         self.base_model.enable_input_require_grads()
@@ -100,6 +96,7 @@ class Actor:
                 else:
                     model.add_adapter(adapter_name=self.profiles[i]["role"], peft_config=config)
             model.print_trainable_parameters()
+            print(f"lora_path is None, initialize {self.num_agents} adapters from scratch")
         else:
             if not os.path.exists(lora_path):
                 raise ValueError(f"LoRA path does not exist: {lora_path}")
@@ -112,20 +109,23 @@ class Actor:
                     model = PeftModel.from_pretrained(self.base_model, adapter_path, adapter_name=adapter_name)
                 else:
                     model.add_adapter(adapter_name=adapter_name, peft_config=PeftConfig.from_pretrained(adapter_path))
+            print(f"lora_path is {lora_path}, load {self.num_agents} adapters from pretrained weights")
         # Apply half-precision across all adapters
         model.half()
         print(f"Initialized model with {self.num_agents} adapters.")
         return model
 
-    def _init_critic(self, critic_weights=None):
+    def _init_critic(self, critic_path=None):
         if self.algo == "APPO":
             critic = APPOCritic(self.base_model, self.tokenizer)
         elif self.algo == "TPPO" or self.algo == "POAD":
             critic = TPPOCritic(self.base_model, self.tokenizer)
         else:
             raise NotImplementedError
-        if critic_weights is not None:
-            critic.v_head.load_state_dict(torch.load(critic_weights, map_location="cpu"))
+        if critic_path is not None:
+            critic_path = os.path.join(critic_path, "critic.pth")
+            critic.load_state_dict(torch.load(critic_path, map_location="cpu"))
+            print(f"Load critic from {critic_path}")
         return critic
 
     @torch.no_grad()
@@ -464,9 +464,9 @@ class Actor:
             raise NotImplementedError
         return next_values
 
-    def save(self, save_dir: str, episode: int) -> None:
+    def save(self, save_dir: str, steps: int) -> None:
         print("save model")
-        exp_path = os.path.join(save_dir, "episode_{:04d}".format(episode))
+        exp_path = os.path.join(save_dir, "steps_{:04d}".format(steps))
 
         os.makedirs(exp_path, exist_ok=True)
         # save lora
@@ -476,8 +476,7 @@ class Actor:
 
     def load(self, save_dir: str):
         self.actor = self._init_actor(save_dir).to(self.device)
-        critic_weights = os.path.join(save_dir, "critic.pth")
-        self.critic = self._init_critic(critic_weights).to(self.device)
+        self.critic = self._init_critic(save_dir).to(self.device)
 
     def train(self):
         self.actor.train()

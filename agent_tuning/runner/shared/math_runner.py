@@ -33,6 +33,7 @@ class MathRunner:
             profile_path=self.all_args.profile_path,
             algo=self.algo,
             normalization_mode=self.all_args.normalization_mode,
+            load_path=self.all_args.load_path,
         )
         
         self.buffer = LanguageBuffer(self.all_args, self.num_agents, self.agent.tokenizer.pad_token_id)
@@ -93,7 +94,7 @@ class MathRunner:
             # post process
             # save model
             if (episode == episodes - 1) or ((episode + 1) % self.all_args.save_interval == 0):
-                self.save(episode)
+                self.save(total_num_steps)
 
             # log info
             if episode % self.log_interval == 0:
